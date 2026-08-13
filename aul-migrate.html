@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AUL's Kitchen — Migrasi Data</title>
+<style>
+  :root{
+    --bg:#0B1D16; --surface:#132920; --surface-hi:#1C3A2C; --line:rgba(215,235,225,0.10);
+    --cream:#F3EFE6; --muted:#9FB8AA; --green:#00704A; --yellow:#E8A33D;
+  }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  body{
+    background:var(--bg); color:var(--cream);
+    font-family:-apple-system, sans-serif;
+    padding:24px; min-height:100vh;
+  }
+  h1{ font-size:1.3rem; margin-bottom:6px; }
+  p.sub{ color:var(--muted); font-size:13px; margin-bottom:24px; }
+  .btn{
+    width:100%; background:var(--green); color:#fff; border:none; padding:16px;
+    border-radius:14px; font-weight:700; font-size:15px; cursor:pointer; margin-bottom:16px;
+  }
+  .btn:disabled{ opacity:0.5; cursor:not-allowed; }
+  .log{
+    background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    padding:14px; font-family:monospace; font-size:12.5px; white-space:pre-wrap;
+    max-height:60vh; overflow-y:auto; line-height:1.6;
+  }
+  .warn{
+    background:rgba(232,163,61,0.12); border:1px solid var(--yellow); color:var(--yellow);
+    padding:12px 14px; border-radius:12px; font-size:12.5px; margin-bottom:20px; line-height:1.6;
+  }
+</style>
+</head>
+<body>
+
+<h1>Migrasi Data Produk</h1>
+<p class="sub">Alat sekali-pakai — pindahin data menu (nama, kategori, harga) yang tadinya hardcoded, ke Firestore. Setelah ini, halaman Menu dan POS baca dari satu sumber yang sama.</p>
+
+<div class="warn">⚠️ Jalankan ini cuma SEKALI. Kalau dijalankan berkali-kali, produk bakal ke-update ulang dengan data yang sama (aman, tapi nggak perlu diulang-ulang).</div>
+
+<button class="btn" id="migrateBtn">Mulai Migrasi</button>
+<div class="log" id="log">Menunggu...</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, doc, setDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
+  authDomain: "auls-kitchen.firebaseapp.com",
+  projectId: "auls-kitchen",
+  storageBucket: "auls-kitchen.firebasestorage.app",
+  messagingSenderId: "981577971183",
+  appId: "1:981577971183:web:61148e193857035c94f21a"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+
+const MENU = [
+  { cat:"Coffee Latte", key:"coffee", color:"c-coffee", items:[
+    ["Ori Ala AUL",9000],["British Butterscotch",12000],["Java Aren",10000],["Caramel Normandy",12000],
+    ["Vienna Hazelnut",13000],["Havana Vibes",14000],["French Mocca",12000],["Doubleshot Americano",7000],
+  ]},
+  { cat:"Milkyway", key:"milky", color:"c-milky", items:[
+    ["Matcha",8000],["Chocolate",9000],["Mango",10000],["Blueberry",15000],
+  ]},
+  { cat:"Fruity Soda", key:"soda", color:"c-soda", items:[
+    ["Grape Soda",7000],["Honey Lemon Soda",7000],["Passion Fruit Soda",7000],["Strawberry Soda",7000],["Pineapple Soda",7000],
+  ]},
+  { cat:"Cool Blend", key:"blend", color:"c-blend", items:[
+    ["Milo",7000],["Taro",7000],["Milk Tea",7000],["Tiramisu",7000],["Red Velvet",7000],
+  ]},
+  { cat:"Fresh Tea Bar", key:"tea", color:"c-tea", items:[
+    ["Mango Tea",6000],["Peach Tea",6000],["Lychee Tea",6000],["Lemon Tea",6000],
+  ]},
+  { cat:"The Cooler", key:"cooler", color:"c-cooler", items:[
+    ["Lemonade",5000],["Blackcurrant",5000],["Passion Fruit",5000],["Pineapple",5000],
+  ]},
+  { cat:"Choco Story", key:"choco", color:"c-choco", items:[
+    ["Belgian Twilight",16000],["Swiss Royale",19000],["Hazelnut Piedmont",20000],["Paris Souffle",16000],["Choco Milano",22000],["London Bridge",19000],
+  ]},
+];
+
+const logEl = document.getElementById("log");
+function log(msg) {
+  logEl.textContent += "\n" + msg;
+  logEl.scrollTop = logEl.scrollHeight;
+}
+
+document.getElementById("migrateBtn").addEventListener("click", async () => {
+  document.getElementById("migrateBtn").disabled = true;
+  logEl.textContent = "Mulai migrasi...";
+  let count = 0;
+  let catOrder = 0;
+
+  for (const section of MENU) {
+    catOrder++;
+    let itemOrder = 0;
+    for (const [name, price] of section.items) {
+      itemOrder++;
+      const docId = `${section.key}__${name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+      try {
+        await setDoc(doc(db, "products", docId), {
+          name,
+          price,
+          category: section.key,
+          categoryLabel: section.cat,
+          categoryColorVar: section.color,
+          categoryOrder: catOrder,
+          itemOrder,
+        });
+        count++;
+        log(`✓ ${section.cat} — ${name} (Rp ${price.toLocaleString("id-ID")})`);
+      } catch (err) {
+        log(`✗ GAGAL: ${section.cat} — ${name}: ${err.message}`);
+      }
+    }
+  }
+  log(`\nSELESAI. ${count} produk berhasil dipindah ke Firestore.`);
+  document.getElementById("migrateBtn").textContent = "Selesai ✓";
+});
+</script>
+</body>
+</html>

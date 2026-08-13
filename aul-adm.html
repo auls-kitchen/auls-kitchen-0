@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AUL's Kitchen — Admin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,500;0,9..144,600;0,9..144,700&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0B1D16; --surface:#132920; --surface-hi:#1C3A2C; --line:rgba(215,235,225,0.10);
+    --cream:#F3EFE6; --muted:#9FB8AA; --green:#00704A; --green-dim:rgba(0,112,74,0.35);
+    --yellow:#E8A33D;
+  }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  html,body{ height:100%; overflow:hidden; }
+  body{
+    background:var(--bg); color:var(--cream);
+    font-family:'Plus Jakarta Sans', sans-serif;
+    -webkit-font-smoothing:antialiased;
+    display:flex; flex-direction:column; height:100vh;
+  }
+  .display{ font-family:'Fraunces', serif; }
+  .mono{ font-family:'JetBrains Mono', monospace; }
+
+  header{
+    padding:14px 18px; border-bottom:1px solid var(--line);
+    display:flex; align-items:center; gap:12px; flex-shrink:0;
+    background:rgba(31,22,17,0.9);
+  }
+  .back-btn{
+    background:var(--surface); border:1px solid var(--line); color:var(--cream);
+    width:36px; height:36px; border-radius:50%; cursor:pointer;
+    display:flex; align-items:center; justify-content:center; flex-shrink:0;
+  }
+  .back-btn svg{ width:18px; height:18px; }
+  header .title{ font-family:'Fraunces', serif; font-weight:600; font-size:1.1rem; }
+  header .subtitle{ color:var(--muted); font-size:11px; font-family:'JetBrains Mono', monospace; }
+
+  nav.tabs{
+    display:flex; gap:8px; padding:12px 18px; border-bottom:1px solid var(--line);
+    overflow-x:auto; flex-shrink:0;
+  }
+  .tab-btn{
+    flex-shrink:0; background:var(--surface); border:1px solid var(--line); color:var(--muted);
+    padding:9px 16px; border-radius:20px; font-size:13px; cursor:pointer; white-space:nowrap;
+  }
+  .tab-btn.active{ background:var(--green-dim); border-color:var(--green); color:var(--cream); font-weight:600; }
+  .tab-btn.disabled{ opacity:0.4; cursor:not-allowed; }
+
+  main{ flex:1; overflow-y:auto; padding:18px; }
+
+  .filter-row{ display:flex; gap:8px; margin-bottom:18px; }
+  .filter-btn{
+    flex:1; background:var(--surface); border:1px solid var(--line); color:var(--muted);
+    padding:11px; border-radius:12px; font-size:13px; cursor:pointer; text-align:center;
+  }
+  .filter-btn.active{ background:var(--yellow); border-color:var(--yellow); color:#000; font-weight:700; }
+
+  .summary-card{
+    background:var(--surface); border:1px solid var(--line); border-radius:16px;
+    padding:20px; margin-bottom:14px;
+  }
+  .summary-label{ color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:0.08em; font-family:'JetBrains Mono', monospace; margin-bottom:6px; }
+  .summary-amount{ font-family:'JetBrains Mono', monospace; font-size:2rem; font-weight:600; color:var(--cream); }
+  .summary-sub{ color:var(--muted); font-size:12.5px; margin-top:4px; }
+
+  .method-grid{ display:flex; gap:12px; margin-bottom:18px; }
+  .method-card{
+    flex:1; background:var(--surface); border:1px solid var(--line); border-radius:14px; padding:16px;
+  }
+  .method-name{ font-family:'Fraunces', serif; font-size:1.05rem; margin-bottom:8px; }
+  .method-amount{ font-family:'JetBrains Mono', monospace; font-size:1.3rem; color:var(--yellow); font-weight:600; }
+  .method-count{ color:var(--muted); font-size:12px; margin-top:4px; }
+
+  .section-label{ font-size:12px; text-transform:uppercase; letter-spacing:0.08em; color:var(--muted); font-family:'JetBrains Mono', monospace; margin:20px 0 10px; }
+
+  .tx-row{
+    display:flex; justify-content:space-between; align-items:center;
+    padding:12px 0; border-bottom:1px solid var(--line); gap:10px;
+  }
+  .tx-left{ min-width:0; }
+  .tx-name{ font-size:13.5px; font-weight:600; }
+  .tx-meta{ color:var(--muted); font-size:11.5px; margin-top:2px; }
+  .tx-right{ text-align:right; flex-shrink:0; }
+  .tx-amount{ font-family:'JetBrains Mono', monospace; color:var(--yellow); font-size:13.5px; }
+  .tx-method{
+    display:inline-block; margin-top:3px; font-size:10px; padding:2px 8px; border-radius:10px;
+    font-family:'JetBrains Mono', monospace; border:1px solid var(--line); color:var(--muted);
+  }
+
+  .empty-msg{ text-align:center; color:var(--muted); padding:40px 20px; font-size:13.5px; }
+  .loading-msg{ text-align:center; color:var(--muted); padding:40px 20px; font-size:13.5px; }
+
+  .add-expense-btn{
+    width:100%; background:var(--green); color:#fff; border:none; padding:13px;
+    border-radius:20px; font-weight:600; font-size:14px; cursor:pointer; margin-bottom:18px;
+  }
+  .expense-row{
+    display:flex; justify-content:space-between; align-items:center;
+    padding:12px 0; border-bottom:1px solid var(--line); gap:10px;
+  }
+  .expense-left{ min-width:0; }
+  .expense-cat{ font-size:13.5px; font-weight:600; }
+  .expense-meta{ color:var(--muted); font-size:11.5px; margin-top:2px; }
+  .expense-right{ display:flex; align-items:center; gap:10px; flex-shrink:0; }
+  .expense-amount{ font-family:'JetBrains Mono', monospace; color:#E8544A; font-size:13.5px; }
+  .expense-del-btn{ background:none; border:none; color:var(--muted); cursor:pointer; padding:2px; }
+  .expense-del-btn svg{ width:16px; height:16px; }
+
+  .modal-overlay{
+    position:fixed; inset:0; background:rgba(10,7,5,0.8); backdrop-filter:blur(6px);
+    display:none; align-items:center; justify-content:center; z-index:300; padding:20px;
+  }
+  .modal-overlay.show{ display:flex; }
+  .expense-modal{ width:100%; max-width:380px; background:var(--surface-hi); border:1px solid var(--line); border-radius:18px; padding:22px; max-height:85vh; overflow-y:auto; }
+  .expense-modal-title{ font-size:1.2rem; margin-bottom:16px; text-align:center; }
+  .field-group{ margin-bottom:14px; }
+  .field-group label{ font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:0.08em; font-family:'JetBrains Mono', monospace; }
+  .opt-tag{ text-transform:none; letter-spacing:0; opacity:0.6; font-family:'Plus Jakarta Sans', sans-serif; }
+  .field-input{
+    width:100%; margin-top:6px; background:var(--bg); border:1px solid var(--line); border-radius:10px;
+    padding:12px 14px; color:var(--cream); font-family:'Plus Jakarta Sans', sans-serif; font-size:14px; outline:none;
+  }
+  .field-input:focus{ border-color:var(--green-dim); }
+  .expense-modal-actions{ display:flex; gap:10px; margin-top:18px; }
+  .modal-cancel{ flex:1; padding:12px; border-radius:20px; background:var(--surface); border:1px solid var(--line); color:var(--muted); cursor:pointer; }
+  .modal-confirm{ flex:1.4; padding:12px; border-radius:20px; background:var(--green); border:none; color:#fff; font-weight:600; cursor:pointer; }
+
+  .labarugi-note{
+    background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    padding:12px 14px; font-size:12px; color:var(--muted); line-height:1.6; margin-bottom:18px;
+  }
+  .lr-row{ display:flex; justify-content:space-between; align-items:baseline; padding:10px 0; font-size:14px; }
+  .lr-row span{ color:var(--muted); }
+  .lr-row strong{ font-family:'JetBrains Mono', monospace; font-size:1.1rem; }
+  .lr-positive{ color:var(--cream); }
+  .lr-negative{ color:#E8544A; }
+  .lr-divider{ border-top:1px solid var(--line); margin:6px 0; }
+  .lr-final{ padding-top:14px; }
+  .lr-final span{ font-size:15px; font-weight:700; color:var(--cream); text-transform:uppercase; letter-spacing:0.05em; font-family:'JetBrains Mono', monospace; }
+  .lr-final strong{ font-size:1.8rem; }
+  .ing-row{
+    background:var(--surface); border:1px solid var(--line); border-radius:14px;
+    padding:14px 16px; margin-bottom:10px;
+  }
+  .ing-top{ display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+  .ing-name{ font-family:'Fraunces', serif; font-size:1.05rem; }
+  .ing-status{
+    font-size:10px; font-family:'JetBrains Mono', monospace; padding:3px 9px; border-radius:10px;
+    flex-shrink:0; white-space:nowrap;
+  }
+  .ing-status.ok{ background:rgba(0,112,74,0.2); color:#4CD787; border:1px solid #4CD787; }
+  .ing-status.warn{ background:rgba(232,163,61,0.15); color:var(--yellow); border:1px solid var(--yellow); }
+  .ing-status.out{ background:rgba(232,84,74,0.15); color:#E8544A; border:1px solid #E8544A; }
+  .ing-meta{ display:flex; gap:18px; margin-top:8px; font-size:12px; color:var(--muted); }
+  .ing-meta strong{ color:var(--cream); font-family:'JetBrains Mono', monospace; }
+  .ing-actions{ display:flex; gap:8px; margin-top:10px; }
+  .ing-action-btn{
+    flex:1; background:var(--surface-hi); border:1px solid var(--line); color:var(--cream);
+    padding:8px; border-radius:10px; font-size:12px; cursor:pointer;
+  }
+  .bahan-subtabs{ display:flex; gap:8px; margin-bottom:16px; }
+  .subtab-btn{
+    flex:1; background:var(--surface); border:1px solid var(--line); color:var(--muted);
+    padding:10px; border-radius:12px; font-size:13px; cursor:pointer; text-align:center;
+  }
+  .subtab-btn.active{ background:var(--green-dim); border-color:var(--green); color:var(--cream); font-weight:600; }
+
+  .recipe-row{
+    display:flex; gap:8px; align-items:center; margin-bottom:8px;
+  }
+  .recipe-row select, .recipe-row input{
+    background:var(--bg); border:1px solid var(--line); border-radius:8px; color:var(--cream);
+    padding:9px 10px; font-size:13px;
+  }
+  .recipe-row select{ flex:2; min-width:0; }
+  .recipe-row input{ flex:1; min-width:0; }
+  .recipe-row-del{ background:none; border:none; color:var(--muted); cursor:pointer; flex-shrink:0; }
+  .recipe-row-del svg{ width:16px; height:16px; }
+
+  .product-recipe-item{
+    display:flex; justify-content:space-between; align-items:center;
+    padding:12px 0; border-bottom:1px solid var(--line);
+  }
+  .product-recipe-item .pr-name{ font-size:13.5px; font-weight:600; }
+  .product-recipe-item .pr-hpp{ font-family:'JetBrains Mono', monospace; color:var(--yellow); font-size:12.5px; }
+  .product-recipe-item .pr-edit{
+    background:var(--surface-hi); border:1px solid var(--line); color:var(--cream);
+    padding:6px 12px; border-radius:10px; font-size:11.5px; cursor:pointer; margin-left:10px;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <button class="back-btn" id="backBtn" type="button">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+  </button>
+  <div>
+    <div class="title display">AUL's Kitchen</div>
+    <div class="subtitle">ADMIN</div>
+  </div>
+</header>
+
+<nav class="tabs">
+  <button class="tab-btn active" data-tab="rekap">Rekap Pembayaran</button>
+  <button class="tab-btn" data-tab="pengeluaran">Pengeluaran</button>
+  <button class="tab-btn" data-tab="labarugi">Laba / Rugi</button>
+  <button class="tab-btn" data-tab="bahan">Bahan Baku</button>
+</nav>
+
+<main>
+  <div class="filter-row" id="filterRow">
+    <button class="filter-btn active" data-period="today">Hari Ini</button>
+    <button class="filter-btn" data-period="month">Bulan Ini</button>
+    <button class="filter-btn" data-period="all">Semua</button>
+  </div>
+
+  <div id="content">
+    <div class="loading-msg">Memuat data...</div>
+  </div>
+</main>
+
+<!-- MODAL TAMBAH PENGELUARAN -->
+<div class="modal-overlay" id="expenseModalOverlay">
+  <div class="expense-modal">
+    <div class="expense-modal-title display">Tambah Pengeluaran</div>
+    <div class="field-group">
+      <label>Tanggal</label>
+      <input type="date" class="field-input" id="expenseDate">
+    </div>
+    <div class="field-group">
+      <label>Kategori</label>
+      <select class="field-input" id="expenseCategory">
+        <option value="Sewa Tempat">Sewa Tempat</option>
+        <option value="Listrik/Air">Listrik/Air</option>
+        <option value="Gaji">Gaji</option>
+        <option value="Bahan Baku">Bahan Baku</option>
+        <option value="Marketing">Marketing</option>
+        <option value="Lainnya">Lainnya</option>
+      </select>
+    </div>
+    <div class="field-group">
+      <label>Nominal</label>
+      <input type="number" inputmode="numeric" class="field-input" id="expenseAmount" placeholder="0">
+    </div>
+    <div class="field-group">
+      <label>Catatan <span class="opt-tag">(opsional)</span></label>
+      <input type="text" class="field-input" id="expenseNote" placeholder="Contoh: beli galon air">
+    </div>
+    <div class="expense-modal-actions">
+      <button class="modal-cancel" id="expenseCancelBtn">Batal</button>
+      <button class="modal-confirm" id="expenseSaveBtn">Simpan</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL TAMBAH BAHAN BAKU -->
+<div class="modal-overlay" id="ingredientModalOverlay">
+  <div class="expense-modal">
+    <div class="expense-modal-title display">Tambah Bahan Baku</div>
+    <div class="field-group">
+      <label>Nama Bahan</label>
+      <input type="text" class="field-input" id="ingName" placeholder="Contoh: Susu Full Cream">
+    </div>
+    <div class="field-group">
+      <label>Satuan</label>
+      <select class="field-input" id="ingUnit">
+        <option value="ml">ml</option>
+        <option value="g">g</option>
+        <option value="pcs">pcs</option>
+      </select>
+    </div>
+    <div class="field-group">
+      <label>Stok Awal</label>
+      <input type="number" inputmode="numeric" class="field-input" id="ingStock" placeholder="0">
+    </div>
+    <div class="field-group">
+      <label>Harga per Satuan Awal</label>
+      <input type="number" inputmode="numeric" class="field-input" id="ingCost" placeholder="0">
+    </div>
+    <div class="field-group">
+      <label>Minimum Stok (buat warning)</label>
+      <input type="number" inputmode="numeric" class="field-input" id="ingMinStock" placeholder="0">
+    </div>
+    <div class="expense-modal-actions">
+      <button class="modal-cancel" id="ingCancelBtn">Batal</button>
+      <button class="modal-confirm" id="ingSaveBtn">Simpan</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL CATAT PEMBELIAN -->
+<div class="modal-overlay" id="purchaseModalOverlay">
+  <div class="expense-modal">
+    <div class="expense-modal-title display">Catat Pembelian</div>
+    <div class="field-group">
+      <label>Bahan</label>
+      <div id="purchaseIngName" style="font-weight:600;padding:6px 0;"></div>
+    </div>
+    <div class="field-group">
+      <label>Tanggal</label>
+      <input type="date" class="field-input" id="purchaseDate">
+    </div>
+    <div class="field-group">
+      <label>Jumlah Dibeli</label>
+      <input type="number" inputmode="numeric" class="field-input" id="purchaseQty" placeholder="0">
+    </div>
+    <div class="field-group">
+      <label>Total Harga</label>
+      <input type="number" inputmode="numeric" class="field-input" id="purchaseTotal" placeholder="0">
+    </div>
+    <div class="field-group">
+      <label>Cost Rata-rata Baru</label>
+      <div id="purchasePreview" style="font-family:'JetBrains Mono',monospace;color:var(--yellow);font-size:1.1rem;padding:6px 0;">-</div>
+    </div>
+    <div class="expense-modal-actions">
+      <button class="modal-cancel" id="purchaseCancelBtn">Batal</button>
+      <button class="modal-confirm" id="purchaseSaveBtn">Simpan</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL RESEP PRODUK -->
+<div class="modal-overlay" id="recipeModalOverlay">
+  <div class="expense-modal" style="max-width:420px;">
+    <div class="expense-modal-title display">Resep Produk</div>
+    <div class="field-group">
+      <label>Pilih Produk</label>
+      <select class="field-input" id="recipeProductSelect"></select>
+    </div>
+    <div class="section-label" style="margin-top:14px;">Bahan dalam Resep</div>
+    <div id="recipeRows"></div>
+    <button class="add-expense-btn" id="recipeAddRowBtn" type="button" style="margin-top:10px;">+ Tambah Bahan</button>
+    <div class="field-group" style="margin-top:14px;">
+      <label>Estimasi HPP</label>
+      <div id="recipeHppPreview" style="font-family:'JetBrains Mono',monospace;color:var(--yellow);font-size:1.4rem;padding:6px 0;">Rp 0</div>
+    </div>
+    <div class="expense-modal-actions">
+      <button class="modal-cancel" id="recipeCancelBtn">Batal</button>
+      <button class="modal-confirm" id="recipeSaveBtn">Simpan Resep</button>
+    </div>
+  </div>
+</div>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc as firestoreDoc,
+  updateDoc, getDocs, serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+const firebaseConfig = {
+  apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
+  authDomain: "auls-kitchen.firebaseapp.com",
+  projectId: "auls-kitchen",
+  storageBucket: "auls-kitchen.firebasestorage.app",
+  messagingSenderId: "981577971183",
+  appId: "1:981577971183:web:61148e193857035c94f21a"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+
+const fmt = n => "Rp " + n.toLocaleString("id-ID");
+
+document.getElementById("backBtn").addEventListener("click", () => {
+  window.location.href = "aul-pos.html";
+});
+
+let currentTab = "rekap";
+let currentPeriod = "today";
+let allTransactions = [];
+let allExpenses = [];
+
+document.querySelectorAll(".tab-btn[data-tab]").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".tab-btn[data-tab]").forEach(b => b.classList.toggle("active", b === btn));
+    currentTab = btn.dataset.tab;
+    render();
+  });
+});
+
+document.querySelectorAll(".filter-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    document.querySelectorAll(".filter-btn").forEach(b => b.classList.toggle("active", b === btn));
+    currentPeriod = btn.dataset.period;
+    render();
+  });
+});
+
+function isInPeriod(date, period) {
+  const now = new Date();
+  if (period === "all") return true;
+  if (period === "today") {
+    return date.getFullYear() === now.getFullYear() &&
+           date.getMonth() === now.getMonth() &&
+           date.getDate() === now.getDate();
+  }
+  if (period === "month") {
+    return date.getFullYear() === now.getFullYear() &&
+           date.getMonth() === now.getMonth();
+  }
+  return true;
+}
+
+function render() {
+  document.getElementById("filterRow").style.display = currentTab === "bahan" ? "none" : "flex";
+  if (currentTab === "rekap") renderRekap();
+  else if (currentTab === "pengeluaran") renderPengeluaran();
+  else if (currentTab === "labarugi") renderLabaRugi();
+  else if (currentTab === "bahan") renderBahan();
+}
+
+function renderRekap() {
+  const content = document.getElementById("content");
+  const filtered = allTransactions.filter(tx => tx.createdAtDate && isInPeriod(tx.createdAtDate, currentPeriod));
+
+  if (filtered.length === 0) {
+    content.innerHTML = `<div class="empty-msg">Belum ada transaksi di periode ini.</div>`;
+    return;
+  }
+
+  const totalPendapatan = filtered.reduce((s, tx) => s + (tx.total || 0), 0);
+  const cashTx = filtered.filter(tx => tx.paymentMethod === "Cash");
+  const qrisTx = filtered.filter(tx => tx.paymentMethod === "QRIS");
+  const cashTotal = cashTx.reduce((s, tx) => s + (tx.total || 0), 0);
+  const qrisTotal = qrisTx.reduce((s, tx) => s + (tx.total || 0), 0);
+
+  const rowsHtml = filtered.slice(0, 50).map(tx => {
+    const timeStr = tx.createdAtDate.toLocaleString("id-ID", { dateStyle: "short", timeStyle: "short" });
+    const itemSummary = (tx.items || []).map(i => `${i.name} x${i.qty}`).join(", ");
+    return `
+      <div class="tx-row">
+        <div class="tx-left">
+          <div class="tx-name">${tx.noStruk || timeStr}${tx.customerName ? " — " + tx.customerName : ""}</div>
+          <div class="tx-meta">${timeStr} · ${itemSummary}</div>
+        </div>
+        <div class="tx-right">
+          <div class="tx-amount">${fmt(tx.total || 0)}</div>
+          <div class="tx-method">${tx.paymentMethod || "-"}</div>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  content.innerHTML = `
+    <div class="summary-card">
+      <div class="summary-label">Total Pendapatan</div>
+      <div class="summary-amount">${fmt(totalPendapatan)}</div>
+      <div class="summary-sub">${filtered.length} transaksi</div>
+    </div>
+    <div class="method-grid">
+      <div class="method-card">
+        <div class="method-name">Cash</div>
+        <div class="method-amount">${fmt(cashTotal)}</div>
+        <div class="method-count">${cashTx.length} transaksi</div>
+      </div>
+      <div class="method-card">
+        <div class="method-name">QRIS</div>
+        <div class="method-amount">${fmt(qrisTotal)}</div>
+        <div class="method-count">${qrisTx.length} transaksi</div>
+      </div>
+    </div>
+    <div class="section-label">Rincian Transaksi (untuk cross-check closing)</div>
+    ${rowsHtml}
+  `;
+}
+
+function renderLabaRugi() {
+  const content = document.getElementById("content");
+  const filteredTx = allTransactions.filter(tx => tx.createdAtDate && isInPeriod(tx.createdAtDate, currentPeriod));
+  const filteredEx = allExpenses.filter(ex => ex.createdAtDate && isInPeriod(ex.createdAtDate, currentPeriod));
+
+  const omzet = filteredTx.reduce((s, tx) => s + (tx.total || 0), 0);
+  const pengeluaran = filteredEx.reduce((s, ex) => s + (ex.amount || 0), 0);
+  const labaBersih = omzet - pengeluaran;
+
+  // rekap pengeluaran per kategori, biar kelihatan kemana aja uangnya kepake
+  const byCategory = {};
+  filteredEx.forEach(ex => {
+    byCategory[ex.category] = (byCategory[ex.category] || 0) + (ex.amount || 0);
+  });
+  const categoryRows = Object.entries(byCategory)
+    .sort((a, b) => b[1] - a[1])
+    .map(([cat, amt]) => `
+      <div class="tx-row">
+        <div class="tx-left"><div class="tx-name">${cat}</div></div>
+        <div class="tx-right"><div class="tx-amount">${fmt(amt)}</div></div>
+      </div>
+    `).join("");
+
+  content.innerHTML = `
+    <div class="labarugi-note">
+      Catatan: ini estimasi kasar (Omzet − Pengeluaran). Belum termasuk HPP
+      (harga modal bahan) karena modul Bahan Baku &amp; Resep belum dibuat —
+      begitu itu selesai, laporan ini otomatis lebih akurat.
+    </div>
+    <div class="lr-row">
+      <span>Omzet</span>
+      <strong class="lr-positive">${fmt(omzet)}</strong>
+    </div>
+    <div class="lr-row">
+      <span>Pengeluaran</span>
+      <strong class="lr-negative">- ${fmt(pengeluaran)}</strong>
+    </div>
+    <div class="lr-divider"></div>
+    <div class="lr-row lr-final">
+      <span>Estimasi Laba Bersih</span>
+      <strong class="${labaBersih >= 0 ? 'lr-positive' : 'lr-negative'}">${fmt(labaBersih)}</strong>
+    </div>
+    ${categoryRows ? `<div class="section-label">Pengeluaran per Kategori</div>${categoryRows}` : ""}
+  `;
+}
+
+function renderPengeluaran() {
+  const content = document.getElementById("content");
+  const filtered = allExpenses.filter(ex => ex.createdAtDate && isInPeriod(ex.createdAtDate, currentPeriod));
+  const totalPengeluaran = filtered.reduce((s, ex) => s + (ex.amount || 0), 0);
+
+  const rowsHtml = filtered.map(ex => {
+    const dateStr = ex.createdAtDate.toLocaleDateString("id-ID", { dateStyle: "medium" });
+    return `
+      <div class="expense-row" data-id="${ex.id}">
+        <div class="expense-left">
+          <div class="expense-cat">${ex.category}</div>
+          <div class="expense-meta">${dateStr}${ex.note ? " · " + ex.note : ""}</div>
+        </div>
+        <div class="expense-right">
+          <div class="expense-amount">- ${fmt(ex.amount || 0)}</div>
+          <button class="expense-del-btn" data-action="delete" aria-label="Hapus">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6"/></svg>
+          </button>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  content.innerHTML = `
+    <button class="add-expense-btn" id="addExpenseBtn">+ Tambah Pengeluaran</button>
+    <div class="summary-card">
+      <div class="summary-label">Total Pengeluaran</div>
+      <div class="summary-amount">${fmt(totalPengeluaran)}</div>
+      <div class="summary-sub">${filtered.length} catatan</div>
+    </div>
+    ${filtered.length === 0 ? '<div class="empty-msg">Belum ada pengeluaran di periode ini.</div>' : `<div class="section-label">Rincian Pengeluaran</div>${rowsHtml}`}
+  `;
+
+  document.getElementById("addExpenseBtn").addEventListener("click", openExpenseModal);
+  content.querySelectorAll('[data-action="delete"]').forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.closest(".expense-row").dataset.id;
+      if (confirm("Hapus catatan pengeluaran ini?")) {
+        deleteDoc(firestoreDoc(db, "expenses", id)).catch(err => alert("Gagal hapus: " + err.message));
+      }
+    });
+  });
+}
+
+// ---------- modal tambah pengeluaran ----------
+const expenseModalOverlay = document.getElementById("expenseModalOverlay");
+function openExpenseModal() {
+  document.getElementById("expenseDate").value = new Date().toISOString().slice(0, 10);
+  document.getElementById("expenseCategory").value = "Bahan Baku";
+  document.getElementById("expenseAmount").value = "";
+  document.getElementById("expenseNote").value = "";
+  expenseModalOverlay.classList.add("show");
+}
+document.getElementById("expenseCancelBtn").addEventListener("click", () => {
+  expenseModalOverlay.classList.remove("show");
+});
+document.getElementById("expenseSaveBtn").addEventListener("click", () => {
+  const dateVal = document.getElementById("expenseDate").value;
+  const category = document.getElementById("expenseCategory").value;
+  const amount = Number(document.getElementById("expenseAmount").value) || 0;
+  const note = document.getElementById("expenseNote").value.trim();
+
+  if (amount <= 0) { alert("Nominal pengeluaran harus diisi."); return; }
+
+  addDoc(collection(db, "expenses"), {
+    date: dateVal,
+    category,
+    amount,
+    note,
+    createdAt: serverTimestamp(),
+  }).then(() => {
+    expenseModalOverlay.classList.remove("show");
+  }).catch(err => alert("Gagal simpan: " + err.message));
+});
+
+onSnapshot(collection(db, "transactions"), snap => {
+  allTransactions = snap.docs.map(doc => {
+    const data = doc.data();
+    return {
+      ...data,
+      createdAtDate: data.createdAt && data.createdAt.toDate ? data.createdAt.toDate() : null,
+    };
+  }).sort((a, b) => (b.createdAtDate || 0) - (a.createdAtDate || 0));
+  render();
+}, err => {
+  document.getElementById("content").innerHTML = `<div class="empty-msg">Gagal memuat data: ${err.message}</div>`;
+});
+
+onSnapshot(collection(db, "expenses"), snap => {
+  allExpenses = snap.docs.map(doc => {
+    const data = doc.data();
+    return {
+      id: doc.id,
+      ...data,
+      createdAtDate: data.createdAt && data.createdAt.toDate ? data.createdAt.toDate() : (data.date ? new Date(data.date) : null),
+    };
+  }).sort((a, b) => (b.createdAtDate || 0) - (a.createdAtDate || 0));
+  if (currentTab === "pengeluaran") render();
+}, err => console.error("Gagal memuat pengeluaran:", err));
+
+// =========================================================
+// BAHAN BAKU + RESEP + AVERAGE COST
+// =========================================================
+let allIngredients = [];
+let allProducts = [];
+let bahanSubTab = "stok"; // "stok" | "resep"
+
+function ingredientStatus(ing) {
+  if ((ing.stock || 0) <= 0) return "out";
+  if ((ing.stock || 0) <= (ing.minStock || 0)) return "warn";
+  return "ok";
+}
+function ingredientStatusLabel(status) {
+  return status === "out" ? "HABIS" : status === "warn" ? "MENIPIS" : "AMAN";
+}
+
+function computeHpp(recipe) {
+  if (!recipe || recipe.length === 0) return null;
+  let total = 0;
+  for (const row of recipe) {
+    const ing = allIngredients.find(i => i.id === row.ingredientId);
+    if (!ing) continue;
+    total += (ing.avgCost || 0) * (row.qty || 0);
+  }
+  return total;
+}
+
+function renderBahan() {
+  const content = document.getElementById("content");
+  content.innerHTML = `
+    <div class="bahan-subtabs">
+      <button class="subtab-btn ${bahanSubTab === 'stok' ? 'active' : ''}" id="subtabStok">Stok Bahan</button>
+      <button class="subtab-btn ${bahanSubTab === 'resep' ? 'active' : ''}" id="subtabResep">Resep Produk</button>
+    </div>
+    <div id="bahanContent"></div>
+  `;
+  document.getElementById("subtabStok").addEventListener("click", () => { bahanSubTab = "stok"; renderBahan(); });
+  document.getElementById("subtabResep").addEventListener("click", () => { bahanSubTab = "resep"; renderBahan(); });
+
+  if (bahanSubTab === "stok") renderStokBahan();
+  else renderResepProduk();
+}
+
+function renderStokBahan() {
+  const el = document.getElementById("bahanContent");
+  const rows = allIngredients.map(ing => {
+    const status = ingredientStatus(ing);
+    return `
+      <div class="ing-row" data-id="${ing.id}">
+        <div class="ing-top">
+          <div class="ing-name">${ing.name}</div>
+          <div class="ing-status ${status}">${ingredientStatusLabel(status)}</div>
+        </div>
+        <div class="ing-meta">
+          <div>Stok <strong>${(ing.stock || 0).toLocaleString("id-ID")} ${ing.unit}</strong></div>
+          <div>Min <strong>${(ing.minStock || 0).toLocaleString("id-ID")} ${ing.unit}</strong></div>
+          <div>Avg Cost <strong>${fmt(Math.round(ing.avgCost || 0))}/${ing.unit}</strong></div>
+        </div>
+        <div class="ing-actions">
+          <button class="ing-action-btn" data-action="beli">+ Catat Pembelian</button>
+          <button class="ing-action-btn" data-action="hapus">Hapus</button>
+        </div>
+      </div>
+    `;
+  }).join("");
+
+  el.innerHTML = `
+    <button class="add-expense-btn" id="addIngredientBtn">+ Tambah Bahan Baku</button>
+    ${allIngredients.length === 0 ? '<div class="empty-msg">Belum ada bahan baku. Tambahin dulu di atas.</div>' : rows}
+  `;
+
+  document.getElementById("addIngredientBtn").addEventListener("click", openIngredientModal);
+  el.querySelectorAll('[data-action="beli"]').forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.closest(".ing-row").dataset.id;
+      openPurchaseModal(id);
+    });
+  });
+  el.querySelectorAll('[data-action="hapus"]').forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.closest(".ing-row").dataset.id;
+      const ing = allIngredients.find(i => i.id === id);
+      if (confirm(`Hapus bahan "${ing.name}"? Resep yang pakai bahan ini nggak otomatis kehapus.`)) {
+        deleteDoc(firestoreDoc(db, "ingredients", id)).catch(err => alert("Gagal hapus: " + err.message));
+      }
+    });
+  });
+}
+
+function renderResepProduk() {
+  const el = document.getElementById("bahanContent");
+  if (allProducts.length === 0) {
+    el.innerHTML = `<div class="empty-msg">Produk belum dimuat. Coba refresh halaman.</div>`;
+    return;
+  }
+  const rows = allProducts.map(p => {
+    const hpp = computeHpp(p.recipe);
+    return `
+      <div class="product-recipe-item" data-id="${p.id}">
+        <div>
+          <div class="pr-name">${p.name}</div>
+          <div class="pr-hpp">${hpp !== null ? "HPP: " + fmt(Math.round(hpp)) : "Belum ada resep"}</div>
+        </div>
+        <button class="pr-edit" data-action="edit">Edit Resep</button>
+      </div>
+    `;
+  }).join("");
+  el.innerHTML = rows;
+  el.querySelectorAll('[data-action="edit"]').forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.closest(".product-recipe-item").dataset.id;
+      openRecipeModal(id);
+    });
+  });
+}
+
+// ---------- modal: tambah bahan baku ----------
+const ingredientModalOverlay = document.getElementById("ingredientModalOverlay");
+function openIngredientModal() {
+  document.getElementById("ingName").value = "";
+  document.getElementById("ingUnit").value = "ml";
+  document.getElementById("ingStock").value = "";
+  document.getElementById("ingCost").value = "";
+  document.getElementById("ingMinStock").value = "";
+  ingredientModalOverlay.classList.add("show");
+}
+document.getElementById("ingCancelBtn").addEventListener("click", () => ingredientModalOverlay.classList.remove("show"));
+document.getElementById("ingSaveBtn").addEventListener("click", () => {
+  const name = document.getElementById("ingName").value.trim();
+  const unit = document.getElementById("ingUnit").value;
+  const stock = Number(document.getElementById("ingStock").value) || 0;
+  const avgCost = Number(document.getElementById("ingCost").value) || 0;
+  const minStock = Number(document.getElementById("ingMinStock").value) || 0;
+  if (!name) { alert("Nama bahan harus diisi."); return; }
+  addDoc(collection(db, "ingredients"), { name, unit, stock, avgCost, minStock, createdAt: serverTimestamp() })
+    .then(() => ingredientModalOverlay.classList.remove("show"))
+    .catch(err => alert("Gagal simpan: " + err.message));
+});
+
+// ---------- modal: catat pembelian ----------
+const purchaseModalOverlay = document.getElementById("purchaseModalOverlay");
+let purchaseIngredientId = null;
+function openPurchaseModal(ingId) {
+  purchaseIngredientId = ingId;
+  const ing = allIngredients.find(i => i.id === ingId);
+  document.getElementById("purchaseIngName").textContent = `${ing.name} (stok sekarang: ${(ing.stock || 0).toLocaleString("id-ID")} ${ing.unit}, avg cost: ${fmt(Math.round(ing.avgCost || 0))}/${ing.unit})`;
+  document.getElementById("purchaseDate").value = new Date().toISOString().slice(0, 10);
+  document.getElementById("purchaseQty").value = "";
+  document.getElementById("purchaseTotal").value = "";
+  document.getElementById("purchasePreview").textContent = "-";
+  purchaseModalOverlay.classList.add("show");
+}
+function updatePurchasePreview() {
+  const ing = allIngredients.find(i => i.id === purchaseIngredientId);
+  if (!ing) return;
+  const qty = Number(document.getElementById("purchaseQty").value) || 0;
+  const total = Number(document.getElementById("purchaseTotal").value) || 0;
+  const newStock = (ing.stock || 0) + qty;
+  if (newStock <= 0 || qty <= 0) {
+    document.getElementById("purchasePreview").textContent = "-";
+    return;
+  }
+  const newAvgCost = (((ing.stock || 0) * (ing.avgCost || 0)) + total) / newStock;
+  document.getElementById("purchasePreview").textContent = `${fmt(Math.round(newAvgCost))}/${ing.unit} (stok jadi ${newStock.toLocaleString("id-ID")} ${ing.unit})`;
+}
+document.getElementById("purchaseQty").addEventListener("input", updatePurchasePreview);
+document.getElementById("purchaseTotal").addEventListener("input", updatePurchasePreview);
+document.getElementById("purchaseCancelBtn").addEventListener("click", () => purchaseModalOverlay.classList.remove("show"));
+document.getElementById("purchaseSaveBtn").addEventListener("click", () => {
+  const ing = allIngredients.find(i => i.id === purchaseIngredientId);
+  const qty = Number(document.getElementById("purchaseQty").value) || 0;
+  const total = Number(document.getElementById("purchaseTotal").value) || 0;
+  const dateVal = document.getElementById("purchaseDate").value;
+  if (qty <= 0 || total <= 0) { alert("Jumlah dan total harga harus diisi."); return; }
+
+  const newStock = (ing.stock || 0) + qty;
+  const newAvgCost = (((ing.stock || 0) * (ing.avgCost || 0)) + total) / newStock;
+
+  Promise.all([
+    updateDoc(firestoreDoc(db, "ingredients", ing.id), { stock: newStock, avgCost: newAvgCost }),
+    addDoc(collection(db, "purchases"), {
+      ingredientId: ing.id, ingredientName: ing.name, qty, unit: ing.unit,
+      totalPrice: total, unitCost: total / qty, date: dateVal, createdAt: serverTimestamp(),
+    }),
+  ]).then(() => {
+    purchaseModalOverlay.classList.remove("show");
+  }).catch(err => alert("Gagal simpan: " + err.message));
+});
+
+// ---------- modal: resep produk ----------
+const recipeModalOverlay = document.getElementById("recipeModalOverlay");
+let currentRecipeProductId = null;
+
+function openRecipeModal(productId) {
+  currentRecipeProductId = productId;
+  const select = document.getElementById("recipeProductSelect");
+  select.innerHTML = allProducts.map(p => `<option value="${p.id}" ${p.id === productId ? "selected" : ""}>${p.categoryLabel || p.category} — ${p.name}</option>`).join("");
+  loadRecipeRows(productId);
+  recipeModalOverlay.classList.add("show");
+}
+document.getElementById("recipeProductSelect").addEventListener("change", (e) => {
+  currentRecipeProductId = e.target.value;
+  loadRecipeRows(currentRecipeProductId);
+});
+
+function loadRecipeRows(productId) {
+  const product = allProducts.find(p => p.id === productId);
+  const recipeRowsEl = document.getElementById("recipeRows");
+  recipeRowsEl.innerHTML = "";
+  const recipe = (product && product.recipe) || [];
+  if (recipe.length === 0) {
+    addRecipeRow();
+  } else {
+    recipe.forEach(row => addRecipeRow(row.ingredientId, row.qty));
+  }
+  updateRecipeHppPreview();
+}
+
+function addRecipeRow(ingredientId, qty) {
+  const recipeRowsEl = document.getElementById("recipeRows");
+  const row = document.createElement("div");
+  row.className = "recipe-row";
+  const options = allIngredients.map(ing => `<option value="${ing.id}" ${ing.id === ingredientId ? "selected" : ""}>${ing.name} (${ing.unit})</option>`).join("");
+  row.innerHTML = `
+    <select class="recipe-ing-select">${options}</select>
+    <input type="number" inputmode="numeric" class="recipe-qty-input" placeholder="Qty" value="${qty || ""}">
+    <button type="button" class="recipe-row-del">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6"/></svg>
+    </button>
+  `;
+  row.querySelector(".recipe-row-del").addEventListener("click", () => { row.remove(); updateRecipeHppPreview(); });
+  row.querySelector(".recipe-ing-select").addEventListener("change", updateRecipeHppPreview);
+  row.querySelector(".recipe-qty-input").addEventListener("input", updateRecipeHppPreview);
+  recipeRowsEl.appendChild(row);
+}
+document.getElementById("recipeAddRowBtn").addEventListener("click", () => addRecipeRow());
+
+function updateRecipeHppPreview() {
+  const rows = [...document.querySelectorAll("#recipeRows .recipe-row")];
+  let total = 0;
+  rows.forEach(row => {
+    const ingId = row.querySelector(".recipe-ing-select").value;
+    const qty = Number(row.querySelector(".recipe-qty-input").value) || 0;
+    const ing = allIngredients.find(i => i.id === ingId);
+    if (ing) total += (ing.avgCost || 0) * qty;
+  });
+  document.getElementById("recipeHppPreview").textContent = fmt(Math.round(total));
+}
+
+document.getElementById("recipeCancelBtn").addEventListener("click", () => recipeModalOverlay.classList.remove("show"));
+document.getElementById("recipeSaveBtn").addEventListener("click", () => {
+  const rows = [...document.querySelectorAll("#recipeRows .recipe-row")];
+  const recipe = rows.map(row => {
+    const ingredientId = row.querySelector(".recipe-ing-select").value;
+    const qty = Number(row.querySelector(".recipe-qty-input").value) || 0;
+    const ing = allIngredients.find(i => i.id === ingredientId);
+    return { ingredientId, ingredientName: ing ? ing.name : "", qty };
+  }).filter(r => r.ingredientId && r.qty > 0);
+
+  updateDoc(firestoreDoc(db, "products", currentRecipeProductId), { recipe })
+    .then(() => {
+      const p = allProducts.find(pr => pr.id === currentRecipeProductId);
+      if (p) p.recipe = recipe;
+      recipeModalOverlay.classList.remove("show");
+      if (currentTab === "bahan") render();
+    })
+    .catch(err => alert("Gagal simpan resep: " + err.message));
+});
+
+onSnapshot(collection(db, "ingredients"), snap => {
+  allIngredients = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+  if (currentTab === "bahan") render();
+}, err => console.error("Gagal memuat bahan baku:", err));
+
+getDocs(collection(db, "products")).then(snap => {
+  allProducts = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+    .sort((a, b) => (a.categoryOrder || 99) - (b.categoryOrder || 99) || (a.itemOrder || 99) - (b.itemOrder || 99));
+  if (currentTab === "bahan") render();
+}).catch(err => console.error("Gagal memuat produk:", err));
+</script>
+</body>
+</html>
