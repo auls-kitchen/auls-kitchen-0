@@ -768,6 +768,8 @@ payConfirmBtn.addEventListener("click", () => {
     customerName,
     noStruk: buildNoStruk(now),
     kasir: KASIR_NAME,
+    source: "POS",
+    status: "COMPLETED",
     createdAt: serverTimestamp(),
   };
   lastTransaction = { ...transaction, createdAt: now };
