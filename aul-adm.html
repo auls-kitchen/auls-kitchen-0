@@ -132,6 +132,10 @@
     background:var(--surface); border:1px solid var(--line); border-radius:12px;
     padding:12px 14px; font-size:12px; color:var(--muted); line-height:1.6; margin-bottom:18px;
   }
+  .labarugi-warning{
+    background:rgba(232,163,61,0.12); border:1px solid var(--yellow); border-radius:12px;
+    padding:12px 14px; font-size:12px; color:var(--yellow); line-height:1.6; margin-bottom:18px;
+  }
   .lr-row{ display:flex; justify-content:space-between; align-items:baseline; padding:10px 0; font-size:14px; }
   .lr-row span{ color:var(--muted); }
   .lr-row strong{ font-family:'JetBrains Mono', monospace; font-size:1.1rem; }
@@ -475,7 +479,24 @@ function renderLabaRugi() {
 
   const omzet = filteredTx.reduce((s, tx) => s + (tx.total || 0), 0);
   const pengeluaran = filteredEx.reduce((s, ex) => s + (ex.amount || 0), 0);
-  const labaBersih = omzet - pengeluaran;
+
+  // HPP: dari transactions[].items[] -> cocokkan ke products by name -> products.recipe -> computeHpp()
+  let hpp = 0;
+  let missingRecipeCount = 0;
+  filteredTx.forEach(tx => {
+    (tx.items || []).forEach(item => {
+      const product = allProducts.find(p => p.name === item.name);
+      const hppPerUnit = computeHpp(product ? product.recipe : null); // null = belum ada resep
+      if (hppPerUnit === null) {
+        missingRecipeCount++;
+      } else {
+        hpp += hppPerUnit * (item.qty || 0);
+      }
+    });
+  });
+
+  const labaKotor = omzet - hpp;
+  const labaBersih = labaKotor - pengeluaran;
 
   // rekap pengeluaran per kategori, biar kelihatan kemana aja uangnya kepake
   const byCategory = {};
@@ -492,17 +513,26 @@ function renderLabaRugi() {
     `).join("");
 
   content.innerHTML = `
-    <div class="labarugi-note">
-      Catatan: ini estimasi kasar (Omzet − Pengeluaran). Belum termasuk HPP
-      (harga modal bahan) karena modul Bahan Baku &amp; Resep belum dibuat —
-      begitu itu selesai, laporan ini otomatis lebih akurat.
-    </div>
+    ${missingRecipeCount > 0 ? `
+      <div class="labarugi-warning">
+        ⚠️ ${missingRecipeCount} item terjual belum bisa dihitung HPP-nya (produk belum punya resep) — dihitung Rp 0 sementara. HPP di bawah ini masih di bawah nilai sebenarnya.
+      </div>
+    ` : ""}
     <div class="lr-row">
       <span>Omzet</span>
       <strong class="lr-positive">${fmt(omzet)}</strong>
     </div>
     <div class="lr-row">
-      <span>Pengeluaran</span>
+      <span>HPP</span>
+      <strong class="lr-negative">- ${fmt(hpp)}</strong>
+    </div>
+    <div class="lr-divider"></div>
+    <div class="lr-row lr-final">
+      <span>Laba Kotor</span>
+      <strong class="${labaKotor >= 0 ? 'lr-positive' : 'lr-negative'}">${fmt(labaKotor)}</strong>
+    </div>
+    <div class="lr-row" style="margin-top:16px;">
+      <span>Pengeluaran Operasional</span>
       <strong class="lr-negative">- ${fmt(pengeluaran)}</strong>
     </div>
     <div class="lr-divider"></div>
