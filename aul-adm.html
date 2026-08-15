@@ -489,9 +489,6 @@ import {
   getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc as firestoreDoc,
   updateDoc, getDocs, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import {
-  getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject
-} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
@@ -503,7 +500,11 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
-const storage = getStorage(firebaseApp);
+
+// Foto produk disimpan di Cloudinary (bukan Firebase Storage — akun ini
+// nggak bisa upgrade ke plan Blaze karena kendala metode pembayaran).
+const CLOUDINARY_CLOUD_NAME = "hfv9oezk";
+const CLOUDINARY_UPLOAD_PRESET = "aul-products";
 
 const fmt = n => "Rp " + n.toLocaleString("id-ID");
 
@@ -1125,12 +1126,12 @@ function renderProducts() {
 }
 
 function deleteProductImage(product) {
-  if (!product || !product.imageUrl) return Promise.resolve();
-  try {
-    return deleteObject(storageRef(storage, `products/${product.id}.webp`)).catch(() => {});
-  } catch (e) {
-    return Promise.resolve();
-  }
+  // Cloudinary unsigned upload preset nggak bisa dipakai buat hapus gambar dari
+  // browser (hapus butuh signed request pakai API secret, nggak aman ditaruh di
+  // client). Jadi ini sengaja no-op: gambar lama di Cloudinary jadi "orphan" file,
+  // tapi Firestore-nya tetap bersih karena field imageUrl ikut kehapus/ganti.
+  // Penghapusan produk TIDAK boleh gagal gara-gara ini.
+  return Promise.resolve();
 }
 
 // ---------- modal add/edit produk ----------
@@ -1377,6 +1378,35 @@ function buildOptionRecipeRows(container, option) {
 }
 
 // ---------- simpan produk ----------
+async function uploadToCloudinary(blob) {
+  const formData = new FormData();
+  formData.append("file", blob);
+  formData.append("upload_preset", CLOUDINARY_UPLOAD_PRESET);
+
+  let res;
+  try {
+    res = await fetch(`https://api.cloudinary.com/v1_1/${CLOUDINARY_CLOUD_NAME}/image/upload`, {
+      method: "POST",
+      body: formData,
+    });
+  } catch (networkErr) {
+    throw new Error("Gagal konek ke Cloudinary (cek koneksi internet).");
+  }
+
+  if (!res.ok) {
+    let msg = `Upload ke Cloudinary gagal (status ${res.status}).`;
+    try {
+      const errJson = await res.json();
+      if (errJson.error && errJson.error.message) msg = errJson.error.message;
+    } catch (e) { /* biarin pesan default */ }
+    throw new Error(msg);
+  }
+
+  const data = await res.json();
+  if (!data.secure_url) throw new Error("Cloudinary tidak mengembalikan URL gambar.");
+  return data.secure_url;
+}
+
 document.getElementById("productSaveBtn").addEventListener("click", async () => {
   const name = document.getElementById("pName").value.trim();
   const price = Number(document.getElementById("pPrice").value) || 0;
@@ -1395,6 +1425,14 @@ document.getElementById("productSaveBtn").addEventListener("click", async () => 
   saveBtn.textContent = "Menyimpan...";
 
   try {
+    // upload foto DULU (kalau ada foto baru) — kalau gagal, produk nggak ditulis/diubah sama sekali
+    let imageUrl = currentProductPhotoUrl || null;
+    if (pendingPhotoBlob) {
+      saveBtn.textContent = "Upload foto...";
+      imageUrl = await uploadToCloudinary(pendingPhotoBlob);
+    }
+
+    saveBtn.textContent = "Menyimpan...";
     const recipe = readPRecipeRows();
     const modifierGroups = currentModifierGroups
       .filter(g => g.name.trim())
@@ -1404,20 +1442,13 @@ document.getElementById("productSaveBtn").addEventListener("click", async () => 
       }));
 
     const productData = { name, price, category, categoryLabel, categoryOrder, itemOrder, recipe, modifierGroups };
+    if (imageUrl) productData.imageUrl = imageUrl;
 
     let productId = currentEditingProductId;
     if (!productId) {
-      const newDocRef = await addDoc(collection(db, "products"), productData);
-      productId = newDocRef.id;
+      await addDoc(collection(db, "products"), productData);
     } else {
       await updateDoc(firestoreDoc(db, "products", productId), productData);
-    }
-
-    if (pendingPhotoBlob) {
-      const imgRef = storageRef(storage, `products/${productId}.webp`);
-      await uploadBytes(imgRef, pendingPhotoBlob, { contentType: "image/webp" });
-      const url = await getDownloadURL(imgRef);
-      await updateDoc(firestoreDoc(db, "products", productId), { imageUrl: url });
     }
 
     productModalOverlay.classList.remove("show");
