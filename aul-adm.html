@@ -194,6 +194,78 @@
     background:var(--surface-hi); border:1px solid var(--line); color:var(--cream);
     padding:6px 12px; border-radius:10px; font-size:11.5px; cursor:pointer; margin-left:10px;
   }
+  .product-list-item{
+    display:flex; align-items:center; gap:12px;
+    background:var(--surface); border:1px solid var(--line); border-radius:14px;
+    padding:12px; margin-bottom:10px;
+  }
+  .product-thumb{
+    width:52px; height:52px; border-radius:10px; object-fit:cover; flex-shrink:0;
+    background:var(--surface-hi);
+  }
+  .product-thumb-placeholder{
+    width:52px; height:52px; border-radius:10px; flex-shrink:0;
+    background:var(--surface-hi); display:flex; align-items:center; justify-content:center;
+    color:var(--muted); font-size:10px; text-align:center;
+  }
+  .product-list-info{ flex:1; min-width:0; }
+  .product-list-name{ font-size:14px; font-weight:600; }
+  .product-list-meta{ color:var(--muted); font-size:11.5px; margin-top:2px; }
+  .product-list-actions{ display:flex; gap:6px; flex-shrink:0; }
+  .product-list-actions button{
+    background:var(--surface-hi); border:1px solid var(--line); color:var(--cream);
+    padding:7px 11px; border-radius:9px; font-size:11px; cursor:pointer;
+  }
+  .product-search{
+    width:100%; background:var(--surface); border:1px solid var(--line); border-radius:12px;
+    padding:11px 14px; color:var(--cream); font-size:13.5px; margin-bottom:14px; outline:none;
+  }
+
+  .photo-preview-frame{
+    width:160px; height:160px; border-radius:14px; border:1.5px dashed var(--line);
+    background:var(--surface); display:flex; align-items:center; justify-content:center;
+    overflow:hidden; margin:0 auto;
+  }
+  .photo-preview-frame img{ width:100%; height:100%; object-fit:cover; display:none; }
+  #photoPreviewPlaceholder{ color:var(--muted); font-size:12px; text-align:center; padding:10px; }
+  .photo-status{ text-align:center; font-size:11.5px; color:var(--muted); margin-top:8px; min-height:16px; }
+
+  .modifier-group-box{
+    background:var(--surface); border:1px solid var(--line); border-radius:14px;
+    padding:14px; margin-bottom:12px;
+  }
+  .modifier-group-top{ display:flex; gap:8px; align-items:center; margin-bottom:10px; }
+  .modifier-group-top input[type="text"]{
+    flex:1; background:var(--bg); border:1px solid var(--line); border-radius:8px;
+    padding:8px 10px; color:var(--cream); font-size:13px;
+  }
+  .modifier-group-del{ background:none; border:none; color:var(--muted); cursor:pointer; flex-shrink:0; }
+  .modifier-group-del svg{ width:16px; height:16px; }
+  .modifier-required-label{ display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--muted); margin-bottom:10px; }
+  .modifier-option-row{
+    display:flex; gap:6px; align-items:center; margin-bottom:6px; flex-wrap:wrap;
+  }
+  .modifier-option-row input[type="text"]{
+    background:var(--bg); border:1px solid var(--line); border-radius:7px; color:var(--cream);
+    padding:7px 9px; font-size:12px; flex:1.4; min-width:70px;
+  }
+  .modifier-option-row input[type="number"]{
+    background:var(--bg); border:1px solid var(--line); border-radius:7px; color:var(--cream);
+    padding:7px 9px; font-size:12px; width:72px;
+  }
+  .modifier-option-row .default-radio{ flex-shrink:0; }
+  .modifier-option-del{ background:none; border:none; color:var(--muted); cursor:pointer; flex-shrink:0; }
+  .modifier-option-del svg{ width:14px; height:14px; }
+  .modifier-option-recipe-btn{
+    background:var(--surface-hi); border:1px solid var(--line); color:var(--muted);
+    font-size:10px; padding:5px 8px; border-radius:7px; cursor:pointer; flex-shrink:0;
+  }
+  .modifier-add-option-btn{
+    background:none; border:1px dashed var(--line); color:var(--muted);
+    width:100%; padding:8px; border-radius:8px; font-size:12px; cursor:pointer; margin-top:4px;
+  }
+  .modifier-option-recipe-rows{ margin:6px 0 6px 0; padding-left:8px; border-left:2px solid var(--line); display:none; }
+  .modifier-option-recipe-rows.show{ display:block; }
 </style>
 </head>
 <body>
@@ -213,6 +285,7 @@
   <button class="tab-btn" data-tab="pengeluaran">Pengeluaran</button>
   <button class="tab-btn" data-tab="labarugi">Laba / Rugi</button>
   <button class="tab-btn" data-tab="bahan">Bahan Baku</button>
+  <button class="tab-btn" data-tab="produk">Produk</button>
 </nav>
 
 <main>
@@ -349,12 +422,76 @@
   </div>
 </div>
 
+<!-- MODAL ADD/EDIT PRODUK -->
+<div class="modal-overlay" id="productModalOverlay">
+  <div class="expense-modal" style="max-width:460px;">
+    <div class="expense-modal-title display" id="productModalTitle">Tambah Produk</div>
+
+    <div class="section-label">Info Dasar</div>
+    <div class="field-group">
+      <label>Nama Produk</label>
+      <input type="text" class="field-input" id="pName" placeholder="Contoh: Java Aren">
+    </div>
+    <div class="field-group">
+      <label>Harga</label>
+      <input type="number" inputmode="numeric" class="field-input" id="pPrice" placeholder="0">
+    </div>
+    <div class="field-group">
+      <label>Category Key</label>
+      <input type="text" class="field-input" id="pCategory" placeholder="Contoh: coffee">
+    </div>
+    <div class="field-group">
+      <label>Category Label</label>
+      <input type="text" class="field-input" id="pCategoryLabel" placeholder="Contoh: Coffee Latte">
+    </div>
+    <div style="display:flex; gap:10px;">
+      <div class="field-group" style="flex:1;">
+        <label>Category Order</label>
+        <input type="number" inputmode="numeric" class="field-input" id="pCategoryOrder" placeholder="1">
+      </div>
+      <div class="field-group" style="flex:1;">
+        <label>Item Order</label>
+        <input type="number" inputmode="numeric" class="field-input" id="pItemOrder" placeholder="1">
+      </div>
+    </div>
+
+    <div class="section-label">Foto Produk</div>
+    <div class="photo-preview-frame" id="photoPreviewFrame">
+      <img id="photoPreviewImg" style="display:none;">
+      <span id="photoPreviewPlaceholder">Belum ada foto</span>
+    </div>
+    <input type="file" accept="image/*" id="pPhotoInput" style="display:none;">
+    <button class="add-expense-btn" id="pPhotoPickBtn" type="button" style="margin-top:10px;">Pilih / Ganti Foto</button>
+    <div class="photo-status" id="photoStatus"></div>
+
+    <div class="section-label">Resep (per 1 unit produk)</div>
+    <div id="pRecipeRows"></div>
+    <button class="add-expense-btn" id="pRecipeAddBtn" type="button">+ Tambah Bahan</button>
+    <div class="field-group" style="margin-top:10px;">
+      <label>Estimasi HPP Dasar</label>
+      <div id="pHppPreview" style="font-family:'JetBrains Mono',monospace;color:var(--yellow);font-size:1.3rem;padding:4px 0;">Rp 0</div>
+    </div>
+
+    <div class="section-label">Modifier</div>
+    <div id="pModifierGroups"></div>
+    <button class="add-expense-btn" id="pAddGroupBtn" type="button">+ Tambah Grup Modifier</button>
+
+    <div class="expense-modal-actions">
+      <button class="modal-cancel" id="productCancelBtn">Batal</button>
+      <button class="modal-confirm" id="productSaveBtn">Simpan Produk</button>
+    </div>
+  </div>
+</div>
+
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc as firestoreDoc,
   updateDoc, getDocs, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-storage.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
@@ -366,6 +503,7 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
+const storage = getStorage(firebaseApp);
 
 const fmt = n => "Rp " + n.toLocaleString("id-ID");
 
@@ -410,11 +548,12 @@ function isInPeriod(date, period) {
 }
 
 function render() {
-  document.getElementById("filterRow").style.display = currentTab === "bahan" ? "none" : "flex";
+  document.getElementById("filterRow").style.display = (currentTab === "bahan" || currentTab === "produk") ? "none" : "flex";
   if (currentTab === "rekap") renderRekap();
   else if (currentTab === "pengeluaran") renderPengeluaran();
   else if (currentTab === "labarugi") renderLabaRugi();
   else if (currentTab === "bahan") renderBahan();
+  else if (currentTab === "produk") renderProducts();
 }
 
 function renderRekap() {
@@ -916,14 +1055,379 @@ document.getElementById("recipeSaveBtn").addEventListener("click", () => {
 onSnapshot(collection(db, "ingredients"), snap => {
   allIngredients = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }))
     .sort((a, b) => a.name.localeCompare(b.name));
-  if (currentTab === "bahan") render();
+  if (currentTab === "bahan" || currentTab === "produk") render();
 }, err => console.error("Gagal memuat bahan baku:", err));
 
-getDocs(collection(db, "products")).then(snap => {
+onSnapshot(collection(db, "products"), snap => {
   allProducts = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }))
     .sort((a, b) => (a.categoryOrder || 99) - (b.categoryOrder || 99) || (a.itemOrder || 99) - (b.itemOrder || 99));
-  if (currentTab === "bahan") render();
-}).catch(err => console.error("Gagal memuat produk:", err));
+  if (currentTab === "bahan" || currentTab === "produk") render();
+}, err => console.error("Gagal memuat produk:", err));
+
+// =========================================================
+// PRODUK (Master Produk CRUD + Foto + Resep + Modifier)
+// =========================================================
+let productSearchTerm = "";
+let currentEditingProductId = null; // null = mode tambah
+let pendingPhotoBlob = null; // hasil crop/resize/compress, siap upload
+let currentProductPhotoUrl = null; // url foto lama (mode edit)
+let currentModifierGroups = []; // state modifier grup selagi modal kebuka
+
+function renderProducts() {
+  const content = document.getElementById("content");
+  const filtered = allProducts.filter(p =>
+    !productSearchTerm || p.name.toLowerCase().includes(productSearchTerm.toLowerCase())
+  );
+
+  const rows = filtered.map(p => `
+    <div class="product-list-item" data-id="${p.id}">
+      ${p.imageUrl
+        ? `<img class="product-thumb" src="${p.imageUrl}" alt="${p.name}">`
+        : `<div class="product-thumb-placeholder">No Foto</div>`}
+      <div class="product-list-info">
+        <div class="product-list-name">${p.name}</div>
+        <div class="product-list-meta">${p.categoryLabel || p.category} · ${fmt(p.price || 0)}${p.modifierGroups && p.modifierGroups.length ? ` · ${p.modifierGroups.length} modifier` : ""}</div>
+      </div>
+      <div class="product-list-actions">
+        <button data-action="edit">Edit</button>
+        <button data-action="delete">Hapus</button>
+      </div>
+    </div>
+  `).join("");
+
+  content.innerHTML = `
+    <button class="add-expense-btn" id="addProductBtn">+ Tambah Produk</button>
+    <input type="text" class="product-search" id="productSearchInput" placeholder="Cari produk..." value="${productSearchTerm}">
+    ${filtered.length === 0 ? '<div class="empty-msg">Produk tidak ditemukan.</div>' : rows}
+  `;
+
+  document.getElementById("addProductBtn").addEventListener("click", () => openProductModal(null));
+  document.getElementById("productSearchInput").addEventListener("input", (e) => {
+    productSearchTerm = e.target.value;
+    const scrollPos = window.scrollY;
+    renderProducts();
+    document.getElementById("productSearchInput").focus();
+  });
+  content.querySelectorAll('[data-action="edit"]').forEach(btn => {
+    btn.addEventListener("click", () => openProductModal(btn.closest(".product-list-item").dataset.id));
+  });
+  content.querySelectorAll('[data-action="delete"]').forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.closest(".product-list-item").dataset.id;
+      const p = allProducts.find(pr => pr.id === id);
+      if (confirm(`Hapus produk "${p.name}"? Tindakan ini tidak bisa dibatalkan.`)) {
+        deleteProductImage(p).finally(() => {
+          deleteDoc(firestoreDoc(db, "products", id)).catch(err => alert("Gagal hapus: " + err.message));
+        });
+      }
+    });
+  });
+}
+
+function deleteProductImage(product) {
+  if (!product || !product.imageUrl) return Promise.resolve();
+  try {
+    return deleteObject(storageRef(storage, `products/${product.id}.webp`)).catch(() => {});
+  } catch (e) {
+    return Promise.resolve();
+  }
+}
+
+// ---------- modal add/edit produk ----------
+const productModalOverlay = document.getElementById("productModalOverlay");
+
+function openProductModal(productId) {
+  currentEditingProductId = productId;
+  pendingPhotoBlob = null;
+  const product = productId ? allProducts.find(p => p.id === productId) : null;
+
+  document.getElementById("productModalTitle").textContent = productId ? "Edit Produk" : "Tambah Produk";
+  document.getElementById("pName").value = product ? product.name : "";
+  document.getElementById("pPrice").value = product ? product.price : "";
+  document.getElementById("pCategory").value = product ? product.category : "";
+  document.getElementById("pCategoryLabel").value = product ? product.categoryLabel : "";
+  document.getElementById("pCategoryOrder").value = product ? product.categoryOrder : "";
+  document.getElementById("pItemOrder").value = product ? product.itemOrder : "";
+
+  currentProductPhotoUrl = product ? product.imageUrl || null : null;
+  const img = document.getElementById("photoPreviewImg");
+  const placeholder = document.getElementById("photoPreviewPlaceholder");
+  if (currentProductPhotoUrl) {
+    img.src = currentProductPhotoUrl;
+    img.style.display = "block";
+    placeholder.style.display = "none";
+  } else {
+    img.style.display = "none";
+    placeholder.style.display = "block";
+  }
+  document.getElementById("photoStatus").textContent = "";
+
+  // resep
+  const pRecipeRowsEl = document.getElementById("pRecipeRows");
+  pRecipeRowsEl.innerHTML = "";
+  const recipe = (product && product.recipe) || [];
+  if (recipe.length === 0) addPRecipeRow(); else recipe.forEach(r => addPRecipeRow(r.ingredientId, r.qty));
+  updatePHppPreview();
+
+  // modifier
+  currentModifierGroups = product && product.modifierGroups
+    ? JSON.parse(JSON.stringify(product.modifierGroups))
+    : [];
+  renderModifierGroupsUI();
+
+  productModalOverlay.classList.add("show");
+}
+document.getElementById("productCancelBtn").addEventListener("click", () => productModalOverlay.classList.remove("show"));
+
+// ---------- resep produk (dalam modal produk) ----------
+function addPRecipeRow(ingredientId, qty) {
+  const el = document.getElementById("pRecipeRows");
+  const row = document.createElement("div");
+  row.className = "recipe-row";
+  const options = allIngredients.map(ing => `<option value="${ing.id}" ${ing.id === ingredientId ? "selected" : ""}>${ing.name} (${ing.unit})</option>`).join("");
+  row.innerHTML = `
+    <select class="recipe-ing-select">${options}</select>
+    <input type="number" inputmode="numeric" class="recipe-qty-input" placeholder="Qty" value="${qty || ""}">
+    <button type="button" class="recipe-row-del">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6"/></svg>
+    </button>
+  `;
+  row.querySelector(".recipe-row-del").addEventListener("click", () => { row.remove(); updatePHppPreview(); });
+  row.querySelector(".recipe-ing-select").addEventListener("change", updatePHppPreview);
+  row.querySelector(".recipe-qty-input").addEventListener("input", updatePHppPreview);
+  el.appendChild(row);
+}
+document.getElementById("pRecipeAddBtn").addEventListener("click", () => addPRecipeRow());
+function readPRecipeRows() {
+  return [...document.querySelectorAll("#pRecipeRows .recipe-row")].map(row => {
+    const ingredientId = row.querySelector(".recipe-ing-select").value;
+    const qty = Number(row.querySelector(".recipe-qty-input").value) || 0;
+    const ing = allIngredients.find(i => i.id === ingredientId);
+    return { ingredientId, ingredientName: ing ? ing.name : "", qty };
+  }).filter(r => r.ingredientId && r.qty > 0);
+}
+function updatePHppPreview() {
+  const recipe = readPRecipeRows();
+  const hpp = computeHpp(recipe) || 0;
+  document.getElementById("pHppPreview").textContent = fmt(Math.round(hpp));
+}
+
+// ---------- foto produk: crop 1:1 -> resize 800x800 -> compress -> WebP ----------
+document.getElementById("pPhotoPickBtn").addEventListener("click", () => document.getElementById("pPhotoInput").click());
+document.getElementById("pPhotoInput").addEventListener("change", async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  document.getElementById("photoStatus").textContent = "Memproses foto...";
+  try {
+    const blob = await processImageTo800Webp(file);
+    pendingPhotoBlob = blob;
+    const url = URL.createObjectURL(blob);
+    const img = document.getElementById("photoPreviewImg");
+    img.src = url;
+    img.style.display = "block";
+    document.getElementById("photoPreviewPlaceholder").style.display = "none";
+    document.getElementById("photoStatus").textContent = `Siap diupload (${(blob.size / 1024).toFixed(0)} KB, 800×800 WebP)`;
+  } catch (err) {
+    document.getElementById("photoStatus").textContent = "Gagal proses foto: " + err.message;
+  }
+});
+
+function processImageTo800Webp(file) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const size = Math.min(img.width, img.height);
+      const sx = (img.width - size) / 2;
+      const sy = (img.height - size) / 2;
+      const canvas = document.createElement("canvas");
+      canvas.width = 800;
+      canvas.height = 800;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(img, sx, sy, size, size, 0, 0, 800, 800);
+      canvas.toBlob(blob => {
+        if (blob) resolve(blob); else reject(new Error("Gagal convert ke WebP"));
+      }, "image/webp", 0.82);
+    };
+    img.onerror = () => reject(new Error("File bukan gambar yang valid"));
+    img.src = URL.createObjectURL(file);
+  });
+}
+
+// ---------- modifier groups editor ----------
+document.getElementById("pAddGroupBtn").addEventListener("click", () => {
+  currentModifierGroups.push({
+    id: crypto.randomUUID(), name: "", selectionType: "single", required: false,
+    options: [{ id: crypto.randomUUID(), name: "Normal", price: 0, isDefault: true, recipe: [] }],
+  });
+  renderModifierGroupsUI();
+});
+
+function renderModifierGroupsUI() {
+  const container = document.getElementById("pModifierGroups");
+  container.innerHTML = currentModifierGroups.map(group => `
+    <div class="modifier-group-box" data-group-id="${group.id}">
+      <div class="modifier-group-top">
+        <input type="text" class="mg-name-input" placeholder="Nama grup (contoh: Sugar Level)" value="${group.name}">
+        <button type="button" class="modifier-group-del" data-action="del-group">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6"/></svg>
+        </button>
+      </div>
+      <label class="modifier-required-label">
+        <input type="checkbox" class="mg-required-input" ${group.required ? "checked" : ""}> Wajib dipilih
+      </label>
+      <div class="mg-options">
+        ${group.options.map(opt => `
+          <div class="modifier-option-row" data-option-id="${opt.id}">
+            <input type="radio" class="default-radio" name="default-${group.id}" ${opt.isDefault ? "checked" : ""} data-action="set-default">
+            <input type="text" class="mo-name-input" placeholder="Nama opsi" value="${opt.name}">
+            <input type="number" inputmode="numeric" class="mo-price-input" placeholder="+Rp" value="${opt.price || ""}">
+            <button type="button" class="modifier-option-recipe-btn" data-action="toggle-recipe">Resep (${(opt.recipe || []).length})</button>
+            <button type="button" class="modifier-option-del" data-action="del-option">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+            </button>
+          </div>
+          <div class="modifier-option-recipe-rows" data-recipe-for="${opt.id}"></div>
+        `).join("")}
+      </div>
+      <button type="button" class="modifier-add-option-btn" data-action="add-option">+ Tambah Opsi</button>
+    </div>
+  `).join("");
+
+  // wire per-group/option events (event delegation per group box)
+  container.querySelectorAll(".modifier-group-box").forEach(groupBox => {
+    const groupId = groupBox.dataset.groupId;
+    const group = currentModifierGroups.find(g => g.id === groupId);
+
+    groupBox.querySelector(".mg-name-input").addEventListener("input", (e) => { group.name = e.target.value; });
+    groupBox.querySelector(".mg-required-input").addEventListener("change", (e) => { group.required = e.target.checked; });
+
+    groupBox.querySelector('[data-action="del-group"]').addEventListener("click", () => {
+      currentModifierGroups = currentModifierGroups.filter(g => g.id !== groupId);
+      renderModifierGroupsUI();
+    });
+    groupBox.querySelector('[data-action="add-option"]').addEventListener("click", () => {
+      group.options.push({ id: crypto.randomUUID(), name: "", price: 0, isDefault: false, recipe: [] });
+      renderModifierGroupsUI();
+    });
+
+    groupBox.querySelectorAll(".modifier-option-row").forEach(optRow => {
+      const optId = optRow.dataset.optionId;
+      const option = group.options.find(o => o.id === optId);
+
+      optRow.querySelector(".mo-name-input").addEventListener("input", (e) => { option.name = e.target.value; });
+      optRow.querySelector(".mo-price-input").addEventListener("input", (e) => { option.price = Number(e.target.value) || 0; });
+      optRow.querySelector('[data-action="set-default"]').addEventListener("change", () => {
+        group.options.forEach(o => o.isDefault = (o.id === optId));
+      });
+      optRow.querySelector('[data-action="del-option"]').addEventListener("click", () => {
+        group.options = group.options.filter(o => o.id !== optId);
+        if (group.options.length && !group.options.some(o => o.isDefault)) group.options[0].isDefault = true;
+        renderModifierGroupsUI();
+      });
+      optRow.querySelector('[data-action="toggle-recipe"]').addEventListener("click", () => {
+        const recipeBox = groupBox.querySelector(`.modifier-option-recipe-rows[data-recipe-for="${optId}"]`);
+        const isShowing = recipeBox.classList.contains("show");
+        if (!isShowing) buildOptionRecipeRows(recipeBox, option);
+        recipeBox.classList.toggle("show", !isShowing);
+      });
+    });
+  });
+}
+
+function buildOptionRecipeRows(container, option) {
+  function refreshCount() {
+    const groupBox = container.closest(".modifier-group-box");
+    const btn = groupBox.querySelector(`.modifier-option-row[data-option-id="${option.id}"] [data-action="toggle-recipe"]`);
+    if (btn) btn.textContent = `Resep (${option.recipe.length})`;
+  }
+  function addRow(ingredientId, qty) {
+    const row = document.createElement("div");
+    row.className = "recipe-row modifier-mini-recipe-row";
+    const opts = allIngredients.map(ing => `<option value="${ing.id}" ${ing.id === ingredientId ? "selected" : ""}>${ing.name} (${ing.unit})</option>`).join("");
+    row.innerHTML = `
+      <select class="mo-recipe-ing">${opts}</select>
+      <input type="number" inputmode="numeric" class="mo-recipe-qty" placeholder="Qty" value="${qty || ""}">
+      <button type="button" class="recipe-row-del">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2m2 0-1 14a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1L5 6"/></svg>
+      </button>
+    `;
+    function sync() {
+      option.recipe = [...container.querySelectorAll(".modifier-mini-recipe-row")].map(r => {
+        const ingId = r.querySelector(".mo-recipe-ing").value;
+        const q = Number(r.querySelector(".mo-recipe-qty").value) || 0;
+        return { ingredientId: ingId, qty: q };
+      }).filter(r => r.ingredientId && r.qty > 0);
+      refreshCount();
+    }
+    row.querySelector(".recipe-row-del").addEventListener("click", () => { row.remove(); sync(); });
+    row.querySelector(".mo-recipe-ing").addEventListener("change", sync);
+    row.querySelector(".mo-recipe-qty").addEventListener("input", sync);
+    container.appendChild(row);
+  }
+  const addBtn = document.createElement("button");
+  addBtn.type = "button";
+  addBtn.className = "modifier-add-option-btn";
+  addBtn.textContent = "+ Tambah Bahan ke Opsi Ini";
+  addBtn.addEventListener("click", () => addRow());
+
+  container.innerHTML = "";
+  const recipe = option.recipe && option.recipe.length ? option.recipe : [];
+  recipe.forEach(r => addRow(r.ingredientId, r.qty));
+  container.appendChild(addBtn);
+}
+
+// ---------- simpan produk ----------
+document.getElementById("productSaveBtn").addEventListener("click", async () => {
+  const name = document.getElementById("pName").value.trim();
+  const price = Number(document.getElementById("pPrice").value) || 0;
+  const category = document.getElementById("pCategory").value.trim();
+  const categoryLabel = document.getElementById("pCategoryLabel").value.trim();
+  const categoryOrder = Number(document.getElementById("pCategoryOrder").value) || 99;
+  const itemOrder = Number(document.getElementById("pItemOrder").value) || 99;
+
+  if (!name || !category || price <= 0) {
+    alert("Nama, Category Key, dan Harga harus diisi dengan benar.");
+    return;
+  }
+
+  const saveBtn = document.getElementById("productSaveBtn");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Menyimpan...";
+
+  try {
+    const recipe = readPRecipeRows();
+    const modifierGroups = currentModifierGroups
+      .filter(g => g.name.trim())
+      .map(g => ({
+        ...g,
+        options: g.options.filter(o => o.name.trim()),
+      }));
+
+    const productData = { name, price, category, categoryLabel, categoryOrder, itemOrder, recipe, modifierGroups };
+
+    let productId = currentEditingProductId;
+    if (!productId) {
+      const newDocRef = await addDoc(collection(db, "products"), productData);
+      productId = newDocRef.id;
+    } else {
+      await updateDoc(firestoreDoc(db, "products", productId), productData);
+    }
+
+    if (pendingPhotoBlob) {
+      const imgRef = storageRef(storage, `products/${productId}.webp`);
+      await uploadBytes(imgRef, pendingPhotoBlob, { contentType: "image/webp" });
+      const url = await getDownloadURL(imgRef);
+      await updateDoc(firestoreDoc(db, "products", productId), { imageUrl: url });
+    }
+
+    productModalOverlay.classList.remove("show");
+  } catch (err) {
+    alert("Gagal simpan produk: " + err.message);
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Simpan Produk";
+  }
+});
 </script>
 </body>
 </html>
