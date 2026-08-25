@@ -283,7 +283,7 @@
 <nav class="tabs">
   <button class="tab-btn active" data-tab="rekap">Rekap Pembayaran</button>
   <button class="tab-btn" data-tab="pengeluaran">Pengeluaran</button>
-  <button class="tab-btn" data-tab="labarugi">Laba / Rugi</button>
+  <button class="tab-btn" data-tab="labarugi">Finansial</button>
   <button class="tab-btn" data-tab="bahan">Bahan Baku</button>
   <button class="tab-btn" data-tab="produk">Produk</button>
 </nav>
@@ -312,7 +312,8 @@
       <label>Kategori</label>
       <select class="field-input" id="expenseCategory">
         <option value="Sewa Tempat">Sewa Tempat</option>
-        <option value="Listrik/Air">Listrik/Air</option>
+        <option value="Listrik">Listrik</option>
+        <option value="Air Galon">Air Galon</option>
         <option value="Gaji">Gaji</option>
         <option value="Bahan Baku">Bahan Baku</option>
         <option value="Marketing">Marketing</option>
@@ -346,8 +347,10 @@
       <label>Satuan</label>
       <select class="field-input" id="ingUnit">
         <option value="ml">ml</option>
-        <option value="g">g</option>
+        <option value="gr">gr</option>
         <option value="pcs">pcs</option>
+        <option value="sac">sac</option>
+        <option value="press">press</option>
       </select>
     </div>
     <div class="field-group">
@@ -504,9 +507,9 @@ const db = getFirestore(firebaseApp);
 // Foto produk disimpan di Cloudinary (bukan Firebase Storage — akun ini
 // nggak bisa upgrade ke plan Blaze karena kendala metode pembayaran).
 const CLOUDINARY_CLOUD_NAME = "hfv9oezk";
-const CLOUDINARY_UPLOAD_PRESET = "aul-products";
+const CLOUDINARY_UPLOAD_PRESET = "aul-product";
 
-const fmt = n => "Rp " + n.toLocaleString("id-ID");
+const fmt = n => "Rp " + Math.ceil(n).toLocaleString("id-ID");
 
 document.getElementById("backBtn").addEventListener("click", () => {
   window.location.href = "aul-pos.html";
@@ -808,7 +811,7 @@ function computeHpp(recipe) {
     if (!ing) continue;
     total += (ing.avgCost || 0) * (row.qty || 0);
   }
-  return total;
+  return Math.ceil(total); // HPP = nilai cost, dibulatkan ke atas (bukan qty bahan)
 }
 
 function renderBahan() {
@@ -911,16 +914,32 @@ function openIngredientModal() {
   ingredientModalOverlay.classList.add("show");
 }
 document.getElementById("ingCancelBtn").addEventListener("click", () => ingredientModalOverlay.classList.remove("show"));
-document.getElementById("ingSaveBtn").addEventListener("click", () => {
+document.getElementById("ingSaveBtn").addEventListener("click", async () => {
   const name = document.getElementById("ingName").value.trim();
   const unit = document.getElementById("ingUnit").value;
   const stock = Number(document.getElementById("ingStock").value) || 0;
   const avgCost = Number(document.getElementById("ingCost").value) || 0;
   const minStock = Number(document.getElementById("ingMinStock").value) || 0;
   if (!name) { alert("Nama bahan harus diisi."); return; }
-  addDoc(collection(db, "ingredients"), { name, unit, stock, avgCost, minStock, createdAt: serverTimestamp() })
-    .then(() => ingredientModalOverlay.classList.remove("show"))
-    .catch(err => alert("Gagal simpan: " + err.message));
+
+  const saveBtn = document.getElementById("ingSaveBtn");
+  saveBtn.disabled = true;
+  try {
+    // cek duplikat langsung ke Firestore (bukan cuma cache lokal), biar tetap konsisten
+    // kalau ada client lain yang juga lagi input di saat bersamaan
+    const snap = await getDocs(collection(db, "ingredients"));
+    const isDup = snap.docs.some(d => (d.data().name || "").trim().toLowerCase() === name.toLowerCase());
+    if (isDup) {
+      alert(`Bahan baku dengan nama "${name}" sudah ada. Nama bahan harus unik.`);
+      return;
+    }
+    await addDoc(collection(db, "ingredients"), { name, unit, stock, avgCost, minStock, createdAt: serverTimestamp(), updatedAt: serverTimestamp() });
+    ingredientModalOverlay.classList.remove("show");
+  } catch (err) {
+    alert("Gagal simpan: " + err.message);
+  } finally {
+    saveBtn.disabled = false;
+  }
 });
 
 // ---------- modal: catat pembelian ----------
@@ -946,8 +965,8 @@ function updatePurchasePreview() {
     document.getElementById("purchasePreview").textContent = "-";
     return;
   }
-  const newAvgCost = (((ing.stock || 0) * (ing.avgCost || 0)) + total) / newStock;
-  document.getElementById("purchasePreview").textContent = `${fmt(Math.round(newAvgCost))}/${ing.unit} (stok jadi ${newStock.toLocaleString("id-ID")} ${ing.unit})`;
+  const newAvgCost = Math.ceil((((ing.stock || 0) * (ing.avgCost || 0)) + total) / newStock);
+  document.getElementById("purchasePreview").textContent = `${fmt(newAvgCost)}/${ing.unit} (stok jadi ${newStock.toLocaleString("id-ID")} ${ing.unit})`;
 }
 document.getElementById("purchaseQty").addEventListener("input", updatePurchasePreview);
 document.getElementById("purchaseTotal").addEventListener("input", updatePurchasePreview);
@@ -959,14 +978,14 @@ document.getElementById("purchaseSaveBtn").addEventListener("click", () => {
   const dateVal = document.getElementById("purchaseDate").value;
   if (qty <= 0 || total <= 0) { alert("Jumlah dan total harga harus diisi."); return; }
 
-  const newStock = (ing.stock || 0) + qty;
-  const newAvgCost = (((ing.stock || 0) * (ing.avgCost || 0)) + total) / newStock;
+  const newStock = (ing.stock || 0) + qty; // qty bahan: presisi asli, TIDAK dibulatkan
+  const newAvgCost = Math.ceil((((ing.stock || 0) * (ing.avgCost || 0)) + total) / newStock); // cost: ceiling
 
   Promise.all([
-    updateDoc(firestoreDoc(db, "ingredients", ing.id), { stock: newStock, avgCost: newAvgCost }),
+    updateDoc(firestoreDoc(db, "ingredients", ing.id), { stock: newStock, avgCost: newAvgCost, updatedAt: serverTimestamp() }),
     addDoc(collection(db, "purchases"), {
       ingredientId: ing.id, ingredientName: ing.name, qty, unit: ing.unit,
-      totalPrice: total, unitCost: total / qty, date: dateVal, createdAt: serverTimestamp(),
+      totalPrice: total, unitCost: Math.ceil(total / qty), date: dateVal, createdAt: serverTimestamp(),
     }),
   ]).then(() => {
     purchaseModalOverlay.classList.remove("show");
@@ -1425,6 +1444,20 @@ document.getElementById("productSaveBtn").addEventListener("click", async () => 
   saveBtn.textContent = "Menyimpan...";
 
   try {
+    // cek duplikat nama produk langsung ke Firestore (bukan cuma cache lokal),
+    // dicek sebelum upload foto biar nggak upload sia-sia kalau bakal ditolak
+    const dupSnap = await getDocs(collection(db, "products"));
+    const isDup = dupSnap.docs.some(d =>
+      d.id !== currentEditingProductId &&
+      (d.data().name || "").trim().toLowerCase() === name.toLowerCase()
+    );
+    if (isDup) {
+      alert(`Produk dengan nama "${name}" sudah ada. Nama produk harus unik.`);
+      saveBtn.disabled = false;
+      saveBtn.textContent = "Simpan Produk";
+      return;
+    }
+
     // upload foto DULU (kalau ada foto baru) — kalau gagal, produk nggak ditulis/diubah sama sekali
     let imageUrl = currentProductPhotoUrl || null;
     if (pendingPhotoBlob) {
