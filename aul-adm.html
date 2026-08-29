@@ -534,6 +534,14 @@
       <label>Category Order</label>
       <input type="number" inputmode="numeric" class="field-input" id="catOrder" placeholder="1">
     </div>
+    <div class="field-group">
+      <label>Warna (opsional)</label>
+      <input type="text" class="field-input" id="catColor" placeholder="Contoh: var(--c-coffee) atau #C68958">
+    </div>
+    <div class="field-group">
+      <label>Catatan / Deskripsi (opsional)</label>
+      <input type="text" class="field-input" id="catNote" placeholder="Contoh: Kopi susu house-blend, creamy & smooth">
+    </div>
     <div class="expense-modal-actions">
       <button class="modal-cancel" id="categoryFormCancelBtn">Batal</button>
       <button class="modal-confirm" id="categoryFormSaveBtn">Simpan Kategori</button>
@@ -1246,6 +1254,8 @@ function openCategoryFormModal(categoryKey) {
   keyInput.disabled = !!categoryKey; // key tidak bisa diubah saat edit (dia doc ID)
   document.getElementById("catLabel").value = cat ? (cat.label || "") : "";
   document.getElementById("catOrder").value = cat ? (cat.categoryOrder != null ? cat.categoryOrder : "") : "";
+  document.getElementById("catColor").value = cat ? (cat.color || "") : "";
+  document.getElementById("catNote").value = cat ? (cat.note || "") : "";
 
   categoryFormModalOverlay.classList.add("show");
 }
@@ -1257,6 +1267,8 @@ document.getElementById("categoryFormSaveBtn").addEventListener("click", async (
   const rawKey = document.getElementById("catKey").value.trim();
   const label = document.getElementById("catLabel").value.trim();
   const categoryOrder = Number(document.getElementById("catOrder").value) || 99;
+  const color = document.getElementById("catColor").value.trim(); // opsional
+  const note = document.getElementById("catNote").value.trim(); // opsional
 
   if (!rawKey || !label) {
     alert("Key dan Label kategori harus diisi.");
@@ -1285,12 +1297,12 @@ document.getElementById("categoryFormSaveBtn").addEventListener("click", async (
         return;
       }
       await setDoc(catDocRef, {
-        label, categoryOrder,
+        label, categoryOrder, color, note,
         createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
       });
     } else {
-      // mode edit: key (doc ID) tidak berubah, hanya update label/order.
-      await updateDoc(catDocRef, { label, categoryOrder, updatedAt: serverTimestamp() });
+      // mode edit: key (doc ID) tidak berubah, hanya update label/order/color/note.
+      await updateDoc(catDocRef, { label, categoryOrder, color, note, updatedAt: serverTimestamp() });
     }
     categoryFormModalOverlay.classList.remove("show");
   } catch (err) {
