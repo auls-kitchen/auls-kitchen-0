@@ -609,7 +609,7 @@ categoryScroll.addEventListener("change", e => {
 });
 
 function addToTicket(catKey, catLabel, name, basePrice, options, qty) {
-  const optionIds = options.map(o => o.id).sort().join(",");
+  const optionIds = options.map(o => o.optionId).sort().join(",");
   const key = `${catKey}|${name}|${optionIds}`;
   const existing = ticket.find(t => t.key === key);
   if (existing) {
