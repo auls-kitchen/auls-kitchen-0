@@ -967,7 +967,7 @@ document.getElementById("ingSaveBtn").addEventListener("click", async () => {
   const name = document.getElementById("ingName").value.trim();
   const unit = document.getElementById("ingUnit").value;
   const stock = Number(document.getElementById("ingStock").value) || 0;
-  const avgCost = Number(document.getElementById("ingCost").value) || 0;
+  const avgCost = Math.ceil(Number(document.getElementById("ingCost").value) || 0);
   const minStock = Number(document.getElementById("ingMinStock").value) || 0;
   if (!name) { alert("Nama bahan harus diisi."); return; }
 
@@ -1090,15 +1090,12 @@ function addRecipeRow(ingredientId, qty) {
 document.getElementById("recipeAddRowBtn").addEventListener("click", () => addRecipeRow());
 
 function updateRecipeHppPreview() {
-  const rows = [...document.querySelectorAll("#recipeRows .recipe-row")];
-  let total = 0;
-  rows.forEach(row => {
-    const ingId = row.querySelector(".recipe-ing-select").value;
-    const qty = Number(row.querySelector(".recipe-qty-input").value) || 0;
-    const ing = allIngredients.find(i => i.id === ingId);
-    if (ing) total += (ing.avgCost || 0) * qty;
-  });
-  document.getElementById("recipeHppPreview").textContent = fmt(Math.round(total));
+  const rows = [...document.querySelectorAll("#recipeRows .recipe-row")].map(row => ({
+    ingredientId: row.querySelector(".recipe-ing-select").value,
+    qty: Number(row.querySelector(".recipe-qty-input").value) || 0,
+  }));
+  const hpp = computeHpp(rows) || 0;
+  document.getElementById("recipeHppPreview").textContent = fmt(hpp);
 }
 
 document.getElementById("recipeCancelBtn").addEventListener("click", () => recipeModalOverlay.classList.remove("show"));
