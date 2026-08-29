@@ -41,10 +41,12 @@
 <h1>Category Diagnostic — READ ONLY</h1>
 <p class="sub">
   Temporary utility for Scope 1B live data inspection. This page performs Firestore
-  <strong>reads only</strong> (getDocs on "products" and "categories") — no setDoc, updateDoc,
-  addDoc, deleteDoc, or batch writes exist anywhere in this file. It does not touch any other
-  collection, and it does not modify the production Admin, POS, Online Menu, or Customer Display
-  files. Delete this file after Scope 1B is finished — it is not meant to be a permanent feature.
+  <strong>reads only</strong> (getDocs on "products" and "categories", plus a targeted getDoc on
+  status/soldOut and on a single product by ID for Scope 1B.2) — no setDoc, updateDoc, addDoc,
+  deleteDoc, arrayUnion/arrayRemove, or batch writes exist anywhere in this file. It does not
+  touch transactions, purchases, expenses, or any other collection, and it does not modify the
+  production Admin, POS, Online Menu, or Customer Display files. Delete this file after Scope 1B
+  is finished — it is not meant to be a permanent feature.
 </p>
 <div class="warn">
   ⚠️ READ-ONLY DIAGNOSTIC. This tool cannot and does not write, delete, or migrate anything.
@@ -60,7 +62,7 @@
 
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
-import { getFirestore, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, getDocs, doc, getDoc } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 // Sama persis dengan konfigurasi publik yang sudah ada di aul-adm.html / aul-pos.html /
 // index.html / customer-display.html — bukan credential baru, cuma dipakai ulang di sini
@@ -97,7 +99,7 @@ async function runDiagnostic() {
   reportOut.value = "";
   statusEl.textContent = "Membaca collection \"products\"...";
 
-  let productDocs, categoryDocs;
+  let productDocs, categoryDocs, soldOutItems, stradaDoc;
   try {
     const productsSnap = await getDocs(collection(db, "products"));
     productDocs = productsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
@@ -105,13 +107,22 @@ async function runDiagnostic() {
     statusEl.textContent = "Membaca collection \"categories\"...";
     const categoriesSnap = await getDocs(collection(db, "categories"));
     categoryDocs = categoriesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    statusEl.textContent = "Membaca status/soldOut (Scope 1B.2)...";
+    const soldOutSnap = await getDoc(doc(db, "status", "soldOut"));
+    const soldOutData = soldOutSnap.exists() ? soldOutSnap.data() : null;
+    soldOutItems = (soldOutData && Array.isArray(soldOutData.items)) ? soldOutData.items : [];
+
+    statusEl.textContent = "Membaca produk Strada (doc ID langsung, Scope 1B.2)...";
+    const stradaSnap = await getDoc(doc(db, "products", "afjuzXhM2UbGpBmLiPAh"));
+    stradaDoc = stradaSnap.exists() ? { id: stradaSnap.id, ...stradaSnap.data() } : null;
   } catch (err) {
     statusEl.textContent = "GAGAL membaca data: " + err.message;
     runBtn.disabled = false;
     return;
   }
 
-  statusEl.textContent = `Berhasil baca ${productDocs.length} produk, ${categoryDocs.length} kategori. Menyusun laporan...`;
+  statusEl.textContent = `Berhasil baca ${productDocs.length} produk, ${categoryDocs.length} kategori, status/soldOut, dan produk Strada. Menyusun laporan...`;
 
   const lines = [];
   const now = new Date();
@@ -274,6 +285,77 @@ async function runDiagnostic() {
       });
     }
   });
+
+  // ---------- 6. SOLD-OUT CHECK (Scope 1B.2) ----------
+  lines.push("");
+  lines.push("--------------------------------------------------------");
+  lines.push("6. SOLD-OUT CHECK (status/soldOut, read-only via getDoc)");
+  lines.push("--------------------------------------------------------");
+  const targetKey = "Milk|Strada";
+  const milkStradaExists = soldOutItems.includes(targetKey);
+  lines.push(`Milk|Strada exists in status/soldOut.items: ${milkStradaExists ? "YES" : "NO"}`);
+  lines.push(`Total items currently in status/soldOut.items: ${soldOutItems.length}`);
+  if (milkStradaExists) {
+    lines.push(`Confirmed exact match found: "${targetKey}"`);
+    lines.push("Full items array (shown because target key was found, for context):");
+    soldOutItems.forEach(k => lines.push(`  - ${k}`));
+  }
+
+  // ---------- 7. STRADA CURRENT STATE (Scope 1B.2) ----------
+  lines.push("");
+  lines.push("--------------------------------------------------------");
+  lines.push("7. STRADA CURRENT STATE (products/afjuzXhM2UbGpBmLiPAh, via getDoc)");
+  lines.push("--------------------------------------------------------");
+  if (!stradaDoc) {
+    lines.push("⚠ Document afjuzXhM2UbGpBmLiPAh was NOT FOUND in products collection.");
+  } else {
+    lines.push(`document ID: ${stradaDoc.id}`);
+    lines.push(`name: ${displayOrEmpty(stradaDoc.name)}`);
+    lines.push(`category: ${displayOrEmpty(stradaDoc.category)}`);
+    lines.push(`categoryLabel: ${displayOrEmpty(stradaDoc.categoryLabel)}`);
+    lines.push(`categoryOrder: ${displayOrEmpty(stradaDoc.categoryOrder)}`);
+    lines.push(`itemOrder: ${displayOrEmpty(stradaDoc.itemOrder)}`);
+  }
+
+  // ---------- 8. MILKY ITEM ORDER CHECK (Scope 1B.2) ----------
+  lines.push("");
+  lines.push("--------------------------------------------------------");
+  lines.push("8. MILKY ITEM ORDER CHECK (category = \"milky\", from products already read)");
+  lines.push("--------------------------------------------------------");
+  const milkyProducts = productDocs.filter(p => p.category === "milky");
+  const targetNames = ["Matcha", "Chocolate", "Mango", "Blueberry"];
+  targetNames.forEach(n => {
+    const p = milkyProducts.find(pr => (pr.name || "").trim().toLowerCase() === n.toLowerCase());
+    if (p) {
+      lines.push(`- ${n}: itemOrder = ${displayOrEmpty(p.itemOrder)} (doc ID: ${p.id})`);
+    } else {
+      lines.push(`- ${n}: ⚠ NOT FOUND under category "milky" in live data.`);
+    }
+  });
+  const otherMilky = milkyProducts.filter(p => !targetNames.some(n => (p.name || "").trim().toLowerCase() === n.toLowerCase()));
+  if (otherMilky.length > 0) {
+    lines.push("Produk lain dengan category \"milky\" yang ditemukan (di luar 4 nama di atas):");
+    otherMilky.forEach(p => lines.push(`  - ${p.name || p.id}: itemOrder = ${displayOrEmpty(p.itemOrder)}`));
+  }
+
+  // ---------- 9. MIGRATION SAFETY RESULT (Scope 1B.2) ----------
+  lines.push("");
+  lines.push("--------------------------------------------------------");
+  lines.push("9. MIGRATION SAFETY RESULT (Milk → milky reassignment for Strada)");
+  lines.push("--------------------------------------------------------");
+  lines.push(`soldOut state risk: ${milkStradaExists ? "YES — \"Milk|Strada\" currently exists in status/soldOut.items and would become an orphaned/unmatched entry if category changes to \"milky\" without also updating this array." : "NO — \"Milk|Strada\" was not found in status/soldOut.items, so no stale sold-out key would be left behind."}`);
+
+  let itemOrderCollision = "NO";
+  if (stradaDoc && stradaDoc.itemOrder !== undefined && stradaDoc.itemOrder !== null) {
+    const collidingWith = milkyProducts.filter(p => p.itemOrder === stradaDoc.itemOrder);
+    if (collidingWith.length > 0) {
+      itemOrderCollision = `YES — Strada's itemOrder (${stradaDoc.itemOrder}) matches: ${collidingWith.map(p => p.name || p.id).join(", ")}`;
+    }
+  } else {
+    itemOrderCollision = "UNKNOWN — Strada's itemOrder is missing/empty, cannot compare.";
+  }
+  lines.push(`itemOrder collision risk: ${itemOrderCollision}`);
+  lines.push("Other confirmed technical risk: none beyond what was already reported in Scope 1B.1 (CATEGORY_COLOR/CATEGORY_META fallback rendering, non-deterministic section ordering when categoryOrder ties, no impact to historical transactions since they store categoryLabel snapshot, not the category key).");
 
   lines.push("");
   lines.push("========================================================");
