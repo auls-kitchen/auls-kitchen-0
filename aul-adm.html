@@ -104,6 +104,12 @@
     background:var(--surface-hi); border:1px solid var(--green); color:var(--yellow);
   }
   .product-toolbar-row #addProductBtn{ flex:1; }
+  .bahan-toolbar-row{ display:flex; gap:8px; margin-bottom:18px; }
+  .bahan-toolbar-row .add-expense-btn{ margin-bottom:0; flex:1; }
+  .bahan-sort-select{
+    flex:0 0 auto; background:var(--surface-hi); border:1px solid var(--line); color:var(--cream);
+    border-radius:20px; padding:0 14px; font-size:13px; font-family:'Plus Jakarta Sans', sans-serif; cursor:pointer;
+  }
   .expense-row{
     display:flex; justify-content:space-between; align-items:center;
     padding:12px 0; border-bottom:1px solid var(--line); gap:10px;
@@ -842,6 +848,7 @@ onSnapshot(collection(db, "expenses"), snap => {
 let allIngredients = [];
 let allProducts = [];
 let bahanSubTab = "stok"; // "stok" | "resep"
+let bahanSortMode = "az"; // "az" | "warning" | "update" — Audit #10, session-only, resets on reload
 
 function ingredientStatus(ing) {
   if ((ing.stock || 0) <= 0) return "out";
@@ -879,9 +886,43 @@ function renderBahan() {
   else renderResepProduk();
 }
 
+// Audit #10: sort HANYA copy lokal untuk tampilan Stok Bahan — allIngredients
+// itu sendiri TIDAK PERNAH di-sort/mutate di sini, supaya dropdown ingredient
+// di resep bahan, resep produk, dan resep opsi modifier tetap A-Z apapun mode
+// sort yang lagi aktif di tab Stok Bahan.
+function sortIngredientsForDisplay(ingredients, mode) {
+  const copy = [...ingredients];
+  if (mode === "warning") {
+    // reuse ingredientStatus() yang sudah ada apa adanya — bukan threshold baru
+    const statusRank = { out: 0, warn: 1, ok: 2 };
+    copy.sort((a, b) => {
+      const rankDiff = statusRank[ingredientStatus(a)] - statusRank[ingredientStatus(b)];
+      if (rankDiff !== 0) return rankDiff;
+      return a.name.localeCompare(b.name); // tie-breaker: A-Z
+    });
+  } else if (mode === "update") {
+    // pola baca Firestore Timestamp yang sama persis kayak yang udah dipakai
+    // di tempat lain di file ini (createdAtDate di rekap/pengeluaran)
+    const getMs = (ing) => (ing.updatedAt && ing.updatedAt.toDate) ? ing.updatedAt.toDate().getTime() : null;
+    copy.sort((a, b) => {
+      const aMs = getMs(a);
+      const bMs = getMs(b);
+      if (aMs === null && bMs === null) return a.name.localeCompare(b.name);
+      if (aMs === null) return 1;  // nggak ada timestamp -> taruh belakang
+      if (bMs === null) return -1;
+      if (bMs !== aMs) return bMs - aMs; // terbaru dulu
+      return a.name.localeCompare(b.name); // tie-breaker: A-Z
+    });
+  } else {
+    copy.sort((a, b) => a.name.localeCompare(b.name)); // "az" (default)
+  }
+  return copy;
+}
+
 function renderStokBahan() {
   const el = document.getElementById("bahanContent");
-  const rows = allIngredients.map(ing => {
+  const sortedIngredients = sortIngredientsForDisplay(allIngredients, bahanSortMode);
+  const rows = sortedIngredients.map(ing => {
     const status = ingredientStatus(ing);
     return `
       <div class="ing-row" data-id="${ing.id}">
@@ -903,11 +944,22 @@ function renderStokBahan() {
   }).join("");
 
   el.innerHTML = `
-    <button class="add-expense-btn" id="addIngredientBtn">+ Tambah Bahan Baku</button>
+    <div class="bahan-toolbar-row">
+      <button class="add-expense-btn" id="addIngredientBtn">+ Tambah Bahan Baku</button>
+      <select class="bahan-sort-select" id="bahanSortSelect">
+        <option value="az" ${bahanSortMode === "az" ? "selected" : ""}>A-Z</option>
+        <option value="warning" ${bahanSortMode === "warning" ? "selected" : ""}>Stok Warning</option>
+        <option value="update" ${bahanSortMode === "update" ? "selected" : ""}>Stok Update</option>
+      </select>
+    </div>
     ${allIngredients.length === 0 ? '<div class="empty-msg">Belum ada bahan baku. Tambahin dulu di atas.</div>' : rows}
   `;
 
   document.getElementById("addIngredientBtn").addEventListener("click", openIngredientModal);
+  document.getElementById("bahanSortSelect").addEventListener("change", (e) => {
+    bahanSortMode = e.target.value;
+    renderStokBahan();
+  });
   el.querySelectorAll('[data-action="beli"]').forEach(btn => {
     btn.addEventListener("click", () => {
       const id = btn.closest(".ing-row").dataset.id;
