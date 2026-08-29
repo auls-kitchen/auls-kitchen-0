@@ -112,6 +112,21 @@
   .opt-row.checked .opt-check svg{ opacity:1; }
   .opt-price{ font-family:'JetBrains Mono', monospace; font-size:11.5px; color:var(--muted); }
   .opt-row.checked .opt-price{ color:var(--cream); }
+  .modifier-radio{
+    position:absolute; opacity:0; width:0; height:0; pointer-events:none;
+  }
+  .modifier-group-block{ margin-bottom:12px; }
+  .modifier-group-header{
+    display:flex; align-items:center; gap:8px; margin-bottom:6px;
+  }
+  .modifier-group-name{ font-size:12.5px; font-weight:600; color:var(--cream); }
+  .modifier-required-badge{
+    font-size:10px; font-family:'JetBrains Mono', monospace; letter-spacing:0.05em;
+    color:var(--red); border:1px solid var(--red); border-radius:20px; padding:1px 7px;
+  }
+  .modifier-group-error{
+    font-size:11.5px; color:var(--red); margin:-2px 0 8px 2px;
+  }
 
   .custom-bottom-row{ display:flex; align-items:center; gap:14px; margin-top:10px; }
   .qty-controls{ display:flex; align-items:center; gap:10px; }
@@ -333,18 +348,6 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
-const OPTION_GROUPS = {
-  coffee: [
-    { id:"less_sugar", label:"Less Sugar", price:0 },
-    { id:"less_ice", label:"Less Ice", price:0 },
-    { id:"double_shot", label:"Double Shot", price:3000 },
-    { id:"stand_alone", label:"Stand Alone", price:2000 },
-  ],
-  default: [
-    { id:"stand_alone", label:"Stand Alone", price:2000 },
-  ],
-};
-function getOptionsFor(catKey){ return OPTION_GROUPS[catKey] || OPTION_GROUPS.default; }
 
 // ===== PRODUK: sumber data sekarang Firestore (koleksi "products"), sama kayak menu konsumen =====
 const CATEGORY_COLOR = {
@@ -353,6 +356,12 @@ const CATEGORY_COLOR = {
 };
 let MENU = [];
 const RECIPE_MAP = {}; // key: "catKey|Nama Produk" -> recipe array [{ingredientId, ingredientName, qty}]
+// Scope 2A: modifier per-produk (bukan lagi per-kategori kayak OPTION_GROUPS lama).
+// key: "catKey|Nama Produk" -> product.modifierGroups[] apa adanya dari Firestore
+// (satu-satunya sumber kebenaran, ditulis dari Admin). Produk tanpa modifierGroups
+// akan punya array kosong di sini, artinya nggak ada UI modifier sama sekali —
+// behavior lama untuk produk tanpa modifier TIDAK berubah.
+const MODIFIER_MAP = {};
 
 async function loadMenuFromFirestore() {
   const snap = await getDocs(collection(db, "products"));
@@ -370,6 +379,7 @@ async function loadMenuFromFirestore() {
     }
     byCategory[d.category].items.push({ name: d.name, price: d.price, order: d.itemOrder || 99 });
     RECIPE_MAP[`${d.category}|${d.name}`] = d.recipe || [];
+    MODIFIER_MAP[`${d.category}|${d.name}`] = d.modifierGroups || [];
   });
   MENU = Object.values(byCategory).sort((a, b) => a.catOrder - b.catOrder);
   MENU.forEach(section => {
@@ -390,8 +400,6 @@ function buildCategoryUI() {
     block.className = "cat-block";
     block.dataset.cat = section.key;
 
-    const options = getOptionsFor(section.key);
-
     block.innerHTML = `
       <button class="cat-header">
         <span class="cat-dot" style="background:${section.color}"></span>
@@ -400,22 +408,36 @@ function buildCategoryUI() {
         <span class="cat-chevron">▾</span>
       </button>
       <div class="cat-items">
-        ${section.items.map(([name, price]) => `
+        ${section.items.map(([name, price], idx) => {
+          const groups = MODIFIER_MAP[`${section.key}|${name}`] || [];
+          return `
           <div class="item-block" data-item="${name}" data-price="${price}" data-cat="${section.key}" data-catlabel="${section.cat}">
             <button class="item-row">
               <span class="item-name">${name}<span class="sold-out-tag">Habis</span></span>
               <span class="item-price mono">${fmt(price)}</span>
             </button>
             <div class="item-custom">
-              ${options.map(opt => `
-                <div class="opt-row" data-opt-id="${opt.id}">
-                  <div class="opt-left">
-                    <div class="opt-check">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>
-                    </div>
-                    <span>${opt.label}</span>
+              ${groups.map(group => `
+                <div class="modifier-group-block" data-group-id="${group.id}" data-group-name="${group.name}" data-required="${group.required === true}">
+                  <div class="modifier-group-header">
+                    <span class="modifier-group-name">${group.name}</span>
+                    ${group.required ? '<span class="modifier-required-badge">Wajib</span>' : ''}
                   </div>
-                  <span class="opt-price mono">${opt.price > 0 ? "+" + fmt(opt.price) : "Rp 0"}</span>
+                  ${(group.options || []).map(opt => `
+                    <label class="opt-row" data-opt-id="${opt.id}">
+                      <input type="radio" class="modifier-radio" name="mg-${section.key}-${idx}-${group.id}"
+                        value="${opt.id}" data-option-id="${opt.id}" data-name="${opt.name}" data-price="${opt.price || 0}"
+                        data-is-default="${opt.isDefault === true}" ${opt.isDefault ? "checked" : ""}>
+                      <div class="opt-left">
+                        <div class="opt-check">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M20 6L9 17l-5-5"/></svg>
+                        </div>
+                        <span>${opt.name}</span>
+                      </div>
+                      <span class="opt-price mono">${opt.price > 0 ? "+" + fmt(opt.price) : "Rp 0"}</span>
+                    </label>
+                  `).join("")}
+                  <div class="modifier-group-error" data-group-error style="display:none;"></div>
                 </div>
               `).join("")}
               <div class="custom-bottom-row">
@@ -428,7 +450,8 @@ function buildCategoryUI() {
               </div>
             </div>
           </div>
-        `).join("")}
+        `;
+        }).join("")}
       </div>
     `;
     categoryScroll.appendChild(block);
@@ -487,15 +510,24 @@ categoryScroll.addEventListener("click", e => {
     if (!wasOpen) {
       itemBlock.classList.add("open");
       itemBlock.querySelector(".qty-value").textContent = "1";
-      itemBlock.querySelectorAll(".opt-row.checked").forEach(o => o.classList.remove("checked"));
+      // Scope 2A: tiap kali item dibuka, reset lalu terapkan ulang pilihan
+      // default per grup modifier (kalau produk ini punya modifierGroups).
+      // Produk tanpa modifierGroups nggak punya .modifier-group-block sama
+      // sekali, jadi loop ini otomatis no-op — behavior lama (nggak ada UI
+      // modifier) tetap sama persis.
+      itemBlock.querySelectorAll(".modifier-group-block").forEach(groupBlock => {
+        groupBlock.querySelectorAll(".opt-row").forEach(row => row.classList.remove("checked"));
+        groupBlock.querySelectorAll(".modifier-radio").forEach(r => { r.checked = false; });
+        const defaultRadio = groupBlock.querySelector('.modifier-radio[data-is-default="true"]');
+        if (defaultRadio) {
+          defaultRadio.checked = true;
+          defaultRadio.closest(".opt-row").classList.add("checked");
+        }
+        const errEl = groupBlock.querySelector("[data-group-error]");
+        if (errEl) { errEl.style.display = "none"; errEl.textContent = ""; }
+      });
       itemBlock.scrollIntoView({ behavior: "smooth", block: "start" });
     }
-    return;
-  }
-
-  const optRow = e.target.closest(".opt-row");
-  if (optRow) {
-    optRow.classList.toggle("checked");
     return;
   }
 
@@ -522,16 +554,58 @@ categoryScroll.addEventListener("click", e => {
     const name = itemBlock.dataset.item;
     const basePrice = Number(itemBlock.dataset.price);
     const qty = parseInt(itemBlock.querySelector(".qty-value").textContent);
-    const checked = [...itemBlock.querySelectorAll(".opt-row.checked")].map(r => {
-      const opt = getOptionsFor(catKey).find(o => o.id === r.dataset.optId);
-      return opt;
+
+    // Scope 2A: validasi grup modifier yang wajib (required) SEBELUM masuk
+    // ke tiket. Pesan error ditampilkan inline di bawah grup yang belum
+    // dipilih (bukan alert()), biar alur Kasir tetap cepat.
+    let hasError = false;
+    const selectedOptions = [];
+    itemBlock.querySelectorAll(".modifier-group-block").forEach(groupBlock => {
+      const required = groupBlock.dataset.required === "true";
+      const selectedRadio = groupBlock.querySelector(".modifier-radio:checked");
+      const errEl = groupBlock.querySelector("[data-group-error]");
+      if (!selectedRadio) {
+        if (required) {
+          hasError = true;
+          if (errEl) {
+            errEl.textContent = "Pilih salah satu opsi di atas sebelum menambahkan ke tiket.";
+            errEl.style.display = "block";
+          }
+        }
+        return; // grup optional tanpa pilihan: nggak nambah apapun ke selectedOptions
+      }
+      if (errEl) { errEl.style.display = "none"; errEl.textContent = ""; }
+      selectedOptions.push({
+        groupId: groupBlock.dataset.groupId,
+        groupName: groupBlock.dataset.groupName,
+        optionId: selectedRadio.dataset.optionId,
+        name: selectedRadio.dataset.name,
+        price: Number(selectedRadio.dataset.price) || 0,
+      });
     });
-    addToTicket(catKey, catLabel, name, basePrice, checked, qty);
+
+    if (hasError) return; // ada grup wajib yang belum dipilih — jangan lanjut ke tiket
+
+    addToTicket(catKey, catLabel, name, basePrice, selectedOptions, qty);
     // tutup semua accordion (item + kategori), lalu kembalikan posisi scroll ke header kategori itu
     itemBlock.classList.remove("open");
     catBlock.classList.remove("open");
     catBlock.scrollIntoView({ behavior: "smooth", block: "start" });
   }
+});
+
+// Scope 2A: klik pada radio modifier (native, lewat <label> pembungkus)
+// memicu "change", bukan cuma "click" — listener terpisah di sini biar
+// styling .opt-row.checked tetap konsisten dan single-select per grup
+// tetap benar (radio native udah otomatis eksklusif per "name" grup).
+categoryScroll.addEventListener("change", e => {
+  const radio = e.target.closest(".modifier-radio");
+  if (!radio) return;
+  const groupBlock = radio.closest(".modifier-group-block");
+  groupBlock.querySelectorAll(".opt-row").forEach(row => row.classList.remove("checked"));
+  radio.closest(".opt-row").classList.add("checked");
+  const errEl = groupBlock.querySelector("[data-group-error]");
+  if (errEl) { errEl.style.display = "none"; errEl.textContent = ""; }
 });
 
 function addToTicket(catKey, catLabel, name, basePrice, options, qty) {
@@ -568,7 +642,7 @@ function renderTicket() {
   payBtn.disabled = false;
 
   ticketList.innerHTML = ticket.map((item, idx) => {
-    const optLabels = item.options.length ? item.options.map(o => o.label).join(", ") : "Original";
+    const optLabels = item.options.length ? item.options.map(o => o.name).join(", ") : "Original";
     return `
       <div class="ticket-item" data-idx="${idx}">
         <div class="ti-top">
@@ -605,7 +679,7 @@ function pushLiveTicket() {
     const total = ticket.reduce((s, i) => s + lineTotal(i), 0);
     const items = ticket.map(item => ({
       name: item.name,
-      optLabels: item.options.length ? item.options.map(o => o.label).join(", ") : "Original",
+      optLabels: item.options.length ? item.options.map(o => o.name).join(", ") : "Original",
       qty: item.qty,
       lineTotal: lineTotal(item),
     }));
@@ -757,7 +831,7 @@ payConfirmBtn.addEventListener("click", () => {
     items: ticket.map(item => ({
       name: item.name,
       catLabel: item.catLabel,
-      optLabels: item.options.length ? item.options.map(o => o.label).join(", ") : "Original",
+      optLabels: item.options.length ? item.options.map(o => o.name).join(", ") : "Original",
       qty: item.qty,
       lineTotal: lineTotal(item),
     })),
