@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AUL's Kitchen — Category Diagnostic (READ-ONLY)</title>
+<style>
+  :root{
+    --bg:#0B1D16; --surface:#132920; --surface-hi:#1C3A2C; --line:rgba(215,235,225,0.10);
+    --cream:#F3EFE6; --muted:#9FB8AA; --green:#00704A; --yellow:#E8A33D; --red:#E85D4A;
+  }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  body{
+    background:var(--bg); color:var(--cream);
+    font-family:-apple-system, sans-serif;
+    padding:20px; min-height:100vh;
+  }
+  h1{ font-size:1.25rem; margin-bottom:4px; }
+  p.sub{ color:var(--muted); font-size:12.5px; margin-bottom:16px; line-height:1.5; }
+  .warn{
+    background:rgba(232,93,74,0.12); border:1px solid var(--red); color:var(--red);
+    padding:12px 14px; border-radius:12px; font-size:12.5px; margin-bottom:18px; line-height:1.6;
+    font-weight:600;
+  }
+  .btn{
+    background:var(--green); color:#fff; border:none; padding:13px 18px;
+    border-radius:14px; font-weight:700; font-size:14px; cursor:pointer; margin-right:8px; margin-bottom:12px;
+  }
+  .btn:disabled{ opacity:0.5; cursor:not-allowed; }
+  .btn.secondary{ background:var(--surface-hi); border:1px solid var(--yellow); color:var(--yellow); }
+  .status{ color:var(--muted); font-size:12.5px; margin-bottom:14px; min-height:18px; }
+  textarea#reportOut{
+    width:100%; min-height:60vh; background:var(--surface); border:1px solid var(--line);
+    border-radius:12px; padding:14px; font-family:'Courier New', monospace; font-size:12.5px;
+    color:var(--cream); line-height:1.5; white-space:pre; resize:vertical;
+  }
+</style>
+</head>
+<body>
+
+<h1>Category Diagnostic — READ ONLY</h1>
+<p class="sub">
+  Temporary utility for Scope 1B live data inspection. This page performs Firestore
+  <strong>reads only</strong> (getDocs on "products" and "categories") — no setDoc, updateDoc,
+  addDoc, deleteDoc, or batch writes exist anywhere in this file. It does not touch any other
+  collection, and it does not modify the production Admin, POS, Online Menu, or Customer Display
+  files. Delete this file after Scope 1B is finished — it is not meant to be a permanent feature.
+</p>
+<div class="warn">
+  ⚠️ READ-ONLY DIAGNOSTIC. This tool cannot and does not write, delete, or migrate anything.
+  If anything here looks wrong, do not "fix" it manually from this page — report it back for
+  an explicit decision.
+</div>
+
+<button class="btn" id="runBtn">Baca Data &amp; Buat Laporan</button>
+<button class="btn secondary" id="copyBtn" disabled>Copy Report</button>
+<div class="status" id="statusEl">Menunggu...</div>
+
+<textarea id="reportOut" readonly placeholder="Laporan akan muncul di sini setelah dijalankan..."></textarea>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getFirestore, collection, getDocs } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// Sama persis dengan konfigurasi publik yang sudah ada di aul-adm.html / aul-pos.html /
+// index.html / customer-display.html — bukan credential baru, cuma dipakai ulang di sini
+// supaya diagnostic ini bisa baca collection yang sama.
+const firebaseConfig = {
+  apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
+  authDomain: "auls-kitchen.firebaseapp.com",
+  projectId: "auls-kitchen",
+  storageBucket: "auls-kitchen.firebasestorage.app",
+  messagingSenderId: "981577971183",
+  appId: "1:981577971183:web:61148e193857035c94f21a"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+
+const statusEl = document.getElementById("statusEl");
+const reportOut = document.getElementById("reportOut");
+const runBtn = document.getElementById("runBtn");
+const copyBtn = document.getElementById("copyBtn");
+
+function norm(s) {
+  return (s === undefined || s === null) ? "" : String(s).trim().toLowerCase();
+}
+function displayOrEmpty(v) {
+  return (v === undefined || v === null || v === "") ? "(kosong)" : v;
+}
+function uniquePreserve(arr) {
+  return [...new Set(arr)];
+}
+
+async function runDiagnostic() {
+  runBtn.disabled = true;
+  copyBtn.disabled = true;
+  reportOut.value = "";
+  statusEl.textContent = "Membaca collection \"products\"...";
+
+  let productDocs, categoryDocs;
+  try {
+    const productsSnap = await getDocs(collection(db, "products"));
+    productDocs = productsSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+
+    statusEl.textContent = "Membaca collection \"categories\"...";
+    const categoriesSnap = await getDocs(collection(db, "categories"));
+    categoryDocs = categoriesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+  } catch (err) {
+    statusEl.textContent = "GAGAL membaca data: " + err.message;
+    runBtn.disabled = false;
+    return;
+  }
+
+  statusEl.textContent = `Berhasil baca ${productDocs.length} produk, ${categoryDocs.length} kategori. Menyusun laporan...`;
+
+  const lines = [];
+  const now = new Date();
+  lines.push("========================================================");
+  lines.push("AUL'S KITCHEN — CATEGORY USAGE REPORT (READ-ONLY DIAGNOSTIC)");
+  lines.push("Generated: " + now.toISOString());
+  lines.push("Products read: " + productDocs.length);
+  lines.push("Categories read: " + categoryDocs.length);
+  lines.push("========================================================");
+  lines.push("");
+
+  // ---------- 1. PRODUCT CATEGORY INVENTORY ----------
+  lines.push("--------------------------------------------------------");
+  lines.push("1. PRODUCT CATEGORY INVENTORY");
+  lines.push("--------------------------------------------------------");
+
+  const byCategory = {}; // rawCategoryKey (as stored, "" if missing) -> array of products
+  productDocs.forEach(p => {
+    const key = (p.category === undefined || p.category === null || p.category === "") ? "" : p.category;
+    if (!byCategory[key]) byCategory[key] = [];
+    byCategory[key].push(p);
+  });
+
+  const categoryKeysSorted = Object.keys(byCategory).sort((a, b) => a.localeCompare(b));
+
+  categoryKeysSorted.forEach(key => {
+    const products = byCategory[key];
+    const labels = uniquePreserve(products.map(p => displayOrEmpty(p.categoryLabel)));
+    const orders = uniquePreserve(products.map(p => (p.categoryOrder === undefined || p.categoryOrder === null) ? "(kosong)" : p.categoryOrder));
+
+    lines.push("");
+    lines.push(`CATEGORY: ${key === "" ? "(MISSING / no category field)" : key}`);
+    lines.push(`LABELS FOUND: ${labels.join(" | ")}`);
+    lines.push(`CATEGORY ORDER VALUES FOUND: ${orders.join(" | ")}`);
+    lines.push(`PRODUCT COUNT: ${products.length}`);
+    lines.push("PRODUCTS:");
+    products
+      .slice()
+      .sort((a, b) => (a.itemOrder ?? 9999) - (b.itemOrder ?? 9999))
+      .forEach(p => {
+        lines.push(`  - [${p.id}] "${p.name || "(no name)"}" | itemOrder: ${displayOrEmpty(p.itemOrder)} | categoryLabel: ${displayOrEmpty(p.categoryLabel)} | categoryOrder: ${displayOrEmpty(p.categoryOrder)}`);
+      });
+    if (labels.length > 1) lines.push(`  ⚠ INCONSISTENT LABELS within this same category key.`);
+    if (orders.length > 1) lines.push(`  ⚠ INCONSISTENT categoryOrder within this same category key.`);
+  });
+
+  // ---------- 2. CATEGORY MASTER INVENTORY ----------
+  lines.push("");
+  lines.push("--------------------------------------------------------");
+  lines.push("2. CATEGORY MASTER INVENTORY (categories/ collection)");
+  lines.push("--------------------------------------------------------");
+  if (categoryDocs.length === 0) {
+    lines.push("(kosong — belum ada dokumen di collection categories)");
+  } else {
+    categoryDocs
+      .slice()
+      .sort((a, b) => (a.categoryOrder ?? 9999) - (b.categoryOrder ?? 9999))
+      .forEach(c => {
+        lines.push(`- id: ${c.id} | label: ${displayOrEmpty(c.label)} | categoryOrder: ${displayOrEmpty(c.categoryOrder)} | createdAt: ${c.createdAt ? "ada" : "(kosong)"} | updatedAt: ${c.updatedAt ? "ada" : "(kosong)"}`);
+      });
+  }
+
+  // ---------- 3. MATCH ANALYSIS ----------
+  lines.push("");
+  lines.push("--------------------------------------------------------");
+  lines.push("3. MATCH ANALYSIS (Product category key vs Category Master doc ID)");
+  lines.push("--------------------------------------------------------");
+
+  const masterIds = new Set(categoryDocs.map(c => c.id));
+  const productKeysUsed = new Set(categoryKeysSorted.filter(k => k !== ""));
+
+  productKeysUsed.forEach(key => {
+    const status = masterIds.has(key) ? "MATCH" : "MISSING FROM MASTER";
+    lines.push(`- "${key}" → ${status} (${byCategory[key].length} produk)`);
+  });
+  masterIds.forEach(id => {
+    if (!productKeysUsed.has(id)) {
+      lines.push(`- "${id}" → MASTER EXISTS BUT UNUSED (tidak ada produk memakainya)`);
+    }
+  });
+  if (byCategory[""] && byCategory[""].length > 0) {
+    lines.push(`- (MISSING category field) → ${byCategory[""].length} produk TIDAK PUNYA field category sama sekali.`);
+  }
+
+  // ---------- 4. POSSIBLE DUPLICATES / CONFLICTS ----------
+  lines.push("");
+  lines.push("--------------------------------------------------------");
+  lines.push("4. POSSIBLE DUPLICATES / CONFLICTS (heuristic — NOT auto-merged)");
+  lines.push("--------------------------------------------------------");
+
+  // group raw keys by normalized form (trim+lowercase) to catch case/whitespace variants
+  const normKeyGroups = {};
+  categoryKeysSorted.filter(k => k !== "").forEach(key => {
+    const n = norm(key);
+    if (!normKeyGroups[n]) normKeyGroups[n] = [];
+    normKeyGroups[n].push(key);
+  });
+  let foundKeyConflict = false;
+  Object.entries(normKeyGroups).forEach(([n, rawKeys]) => {
+    if (rawKeys.length > 1) {
+      foundKeyConflict = true;
+      lines.push(`⚠ Possible key variants (normalize to "${n}"): ${rawKeys.join(" | ")}`);
+      rawKeys.forEach(k => {
+        lines.push(`    "${k}" used by: ${byCategory[k].map(p => p.name || p.id).join(", ")}`);
+      });
+    }
+  });
+
+  // group by normalized label across different category keys
+  const normLabelGroups = {}; // normalizedLabel -> Set of raw category keys
+  categoryKeysSorted.filter(k => k !== "").forEach(key => {
+    byCategory[key].forEach(p => {
+      const nl = norm(p.categoryLabel);
+      if (!nl) return;
+      if (!normLabelGroups[nl]) normLabelGroups[nl] = new Set();
+      normLabelGroups[nl].add(key);
+    });
+  });
+  let foundLabelConflict = false;
+  Object.entries(normLabelGroups).forEach(([nl, keySet]) => {
+    if (keySet.size > 1) {
+      foundLabelConflict = true;
+      lines.push(`⚠ Same/similar label "${nl}" used across different category keys: ${[...keySet].join(" | ")}`);
+      [...keySet].forEach(k => {
+        lines.push(`    key "${k}" → produk: ${byCategory[k].map(p => p.name || p.id).join(", ")}`);
+      });
+    }
+  });
+
+  if (!foundKeyConflict && !foundLabelConflict) {
+    lines.push("Tidak ditemukan indikasi duplikat/konflik dari heuristik di atas.");
+  }
+
+  // ---------- 5. ORDER INTEGRITY ----------
+  lines.push("");
+  lines.push("--------------------------------------------------------");
+  lines.push("5. ORDER INTEGRITY");
+  lines.push("--------------------------------------------------------");
+  categoryKeysSorted.forEach(key => {
+    const products = byCategory[key];
+    const catOrders = uniquePreserve(products.map(p => p.categoryOrder ?? null));
+    const itemOrders = products.map(p => p.itemOrder ?? null);
+    const missingItemOrder = products.filter(p => p.itemOrder === undefined || p.itemOrder === null);
+    const itemOrderCounts = {};
+    itemOrders.forEach(o => {
+      if (o === null) return;
+      itemOrderCounts[o] = (itemOrderCounts[o] || 0) + 1;
+    });
+    const dupItemOrders = Object.entries(itemOrderCounts).filter(([, count]) => count > 1);
+
+    lines.push("");
+    lines.push(`CATEGORY: ${key === "" ? "(MISSING)" : key}`);
+    lines.push(`  categoryOrder values: ${catOrders.map(v => v === null ? "(kosong)" : v).join(" | ")}${catOrders.length > 1 ? "  ⚠ CONFLICTING" : ""}`);
+    lines.push(`  itemOrder missing count: ${missingItemOrder.length}${missingItemOrder.length > 0 ? "  ⚠ (produk: " + missingItemOrder.map(p => p.name || p.id).join(", ") + ")" : ""}`);
+    if (dupItemOrders.length > 0) {
+      lines.push(`  ⚠ Duplicate itemOrder values within this category:`);
+      dupItemOrders.forEach(([order, count]) => {
+        const names = products.filter(p => p.itemOrder == order).map(p => p.name || p.id).join(", ");
+        lines.push(`    itemOrder ${order} used ${count}x by: ${names}`);
+      });
+    }
+  });
+
+  lines.push("");
+  lines.push("========================================================");
+  lines.push("END OF REPORT");
+  lines.push("========================================================");
+
+  reportOut.value = lines.join("\n");
+  statusEl.textContent = `Selesai. ${productDocs.length} produk, ${categoryDocs.length} kategori dibaca. Tidak ada data yang diubah/ditulis.`;
+  runBtn.disabled = false;
+  copyBtn.disabled = false;
+}
+
+runBtn.addEventListener("click", runDiagnostic);
+
+copyBtn.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(reportOut.value);
+    statusEl.textContent = "Report disalin ke clipboard. Silakan paste ke chat.";
+  } catch (err) {
+    // fallback kalau clipboard API diblokir browser
+    reportOut.select();
+    document.execCommand("copy");
+    statusEl.textContent = "Report disalin (fallback method). Silakan paste ke chat.";
+  }
+});
+</script>
+</body>
+</html>
