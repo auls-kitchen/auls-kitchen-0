@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AUL's Kitchen — Category Master Population (Scope 1C)</title>
+<style>
+  :root{
+    --bg:#0B1D16; --surface:#132920; --surface-hi:#1C3A2C; --line:rgba(215,235,225,0.10);
+    --cream:#F3EFE6; --muted:#9FB8AA; --green:#00704A; --yellow:#E8A33D; --red:#E85D4A;
+  }
+  *{ box-sizing:border-box; margin:0; padding:0; }
+  body{ background:var(--bg); color:var(--cream); font-family:-apple-system, sans-serif; padding:20px; min-height:100vh; }
+  h1{ font-size:1.25rem; margin-bottom:4px; }
+  p.sub{ color:var(--muted); font-size:12.5px; margin-bottom:16px; line-height:1.5; }
+  .warn{
+    background:rgba(232,93,74,0.12); border:1px solid var(--red); color:var(--red);
+    padding:12px 14px; border-radius:12px; font-size:12.5px; margin-bottom:14px; line-height:1.6; font-weight:600;
+  }
+  .scope{
+    background:rgba(232,163,61,0.10); border:1px solid var(--yellow); color:var(--yellow);
+    padding:12px 14px; border-radius:12px; font-size:12px; margin-bottom:18px; line-height:1.6;
+  }
+  .btn{
+    background:var(--green); color:#fff; border:none; padding:13px 18px;
+    border-radius:14px; font-weight:700; font-size:14px; cursor:pointer; margin-right:8px; margin-bottom:12px;
+  }
+  .btn:disabled{ opacity:0.5; cursor:not-allowed; }
+  .btn.secondary{ background:var(--surface-hi); border:1px solid var(--yellow); color:var(--yellow); }
+  .btn.danger{ background:var(--red); }
+  .status{ color:var(--muted); font-size:12.5px; margin-bottom:14px; min-height:18px; }
+  textarea#reportOut{
+    width:100%; min-height:55vh; background:var(--surface); border:1px solid var(--line);
+    border-radius:12px; padding:14px; font-family:'Courier New', monospace; font-size:12.5px;
+    color:var(--cream); line-height:1.5; white-space:pre; resize:vertical;
+  }
+</style>
+</head>
+<body>
+
+<h1>Category Master Population — Scope 1C</h1>
+<p class="sub">
+  One-time-use utility. Writes ONLY to <code>categories/coffee</code>, <code>categories/milky</code>,
+  <code>categories/soda</code>, <code>categories/blend</code>, <code>categories/tea</code>,
+  <code>categories/cooler</code>, <code>categories/choco</code> — nothing else. Every one of those 7
+  documents is read first; a matching existing document is left completely untouched (no rewrite,
+  no timestamp change); a missing document is created; a conflicting existing document is reported
+  and NOT written. No product document, no <code>blueelectric</code>, and no other collection is ever
+  written to. Delete this file after Scope 1C is verified — it is not a permanent feature.
+</p>
+<div class="warn">
+  ⚠️ This is the first tool in this project that performs real Firestore writes. It will ask for
+  explicit confirmation before writing anything, and only after showing you exactly what it found.
+</div>
+<div class="scope">
+  Allowed writes: setDoc on categories/{coffee, milky, soda, blend, tea, cooler, choco} — new
+  documents only, using {label, categoryOrder, createdAt, updatedAt}. No updateDoc, no deleteDoc,
+  no arrayUnion/arrayRemove, no writes to any product, no writes to categories/blueelectric.
+</div>
+
+<button class="btn secondary" id="inspectBtn">1. Baca &amp; Bandingkan (read-only)</button>
+<button class="btn danger" id="writeBtn" disabled>2. Tulis Kategori yang Belum Ada (writes)</button>
+<button class="btn secondary" id="copyBtn" disabled>Copy Report</button>
+<div class="status" id="statusEl">Menunggu...</div>
+
+<textarea id="reportOut" readonly placeholder="Laporan akan muncul di sini..."></textarea>
+
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import {
+  getFirestore, collection, getDocs, doc, getDoc, setDoc, serverTimestamp
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+// Konfigurasi publik yang sama persis dengan file lain di project ini — bukan credential baru.
+const firebaseConfig = {
+  apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
+  authDomain: "auls-kitchen.firebaseapp.com",
+  projectId: "auls-kitchen",
+  storageBucket: "auls-kitchen.firebasestorage.app",
+  messagingSenderId: "981577971183",
+  appId: "1:981577971183:web:61148e193857035c94f21a"
+};
+const firebaseApp = initializeApp(firebaseConfig);
+const db = getFirestore(firebaseApp);
+
+// Satu-satunya sumber kebenaran untuk apa yang boleh ditulis di file ini.
+// Sengaja di-hardcode ke 7 key ini SAJA — tidak ada loop generik yang bisa
+// "kebablasan" nulis ke key lain.
+const CANONICAL = [
+  { key: "coffee", label: "Coffee Latte", categoryOrder: 1 },
+  { key: "milky",  label: "Milkyway",     categoryOrder: 2 },
+  { key: "soda",   label: "Fruity Soda",  categoryOrder: 3 },
+  { key: "blend",  label: "Cool Blend",   categoryOrder: 4 },
+  { key: "tea",    label: "Fresh Tea Bar",categoryOrder: 5 },
+  { key: "cooler", label: "The Cooler",   categoryOrder: 6 },
+  { key: "choco",  label: "Choco Story",  categoryOrder: 7 },
+];
+const STRADA_ID = "afjuzXhM2UbGpBmLiPAh";
+
+const statusEl = document.getElementById("statusEl");
+const reportOut = document.getElementById("reportOut");
+const inspectBtn = document.getElementById("inspectBtn");
+const writeBtn = document.getElementById("writeBtn");
+const copyBtn = document.getElementById("copyBtn");
+
+let lastInspection = null; // { toCreate: [...], matching: [...], conflicts: [...] }
+
+function fieldsMatch(existing, canonical) {
+  return existing.label === canonical.label && existing.categoryOrder === canonical.categoryOrder;
+}
+
+async function inspect() {
+  inspectBtn.disabled = true;
+  writeBtn.disabled = true;
+  copyBtn.disabled = true;
+  reportOut.value = "";
+  statusEl.textContent = "Membaca 7 dokumen kategori kanonis satu per satu...";
+
+  const toCreate = [];
+  const matching = [];
+  const conflicts = [];
+
+  try {
+    for (const c of CANONICAL) {
+      const snap = await getDoc(doc(db, "categories", c.key));
+      if (!snap.exists()) {
+        toCreate.push(c);
+      } else {
+        const existing = { id: snap.id, ...snap.data() };
+        if (fieldsMatch(existing, c)) {
+          matching.push({ canonical: c, existing });
+        } else {
+          conflicts.push({ canonical: c, existing });
+        }
+      }
+    }
+
+    statusEl.textContent = "Membaca categories/blueelectric (read-only, verifikasi tidak berubah)...";
+    const blueSnap = await getDoc(doc(db, "categories", "blueelectric"));
+    const blueelectric = blueSnap.exists() ? { id: blueSnap.id, ...blueSnap.data() } : null;
+
+    statusEl.textContent = "Membaca products (read-only, hitung total + cek Strada)...";
+    const productsSnap = await getDocs(collection(db, "products"));
+    const productCount = productsSnap.size;
+    const stradaSnap = await getDoc(doc(db, "products", STRADA_ID));
+    const strada = stradaSnap.exists() ? { id: stradaSnap.id, ...stradaSnap.data() } : null;
+
+    lastInspection = { toCreate, matching, conflicts, blueelectric, productCount, strada };
+
+    const lines = [];
+    lines.push("========================================================");
+    lines.push("SCOPE 1C — CATEGORY MASTER POPULATION — INSPECTION (read-only)");
+    lines.push("Generated: " + new Date().toISOString());
+    lines.push("========================================================");
+    lines.push("");
+    lines.push("TO CREATE (missing, safe to write): " + toCreate.length);
+    toCreate.forEach(c => lines.push(`  - categories/${c.key} → label: "${c.label}", categoryOrder: ${c.categoryOrder}`));
+    lines.push("");
+    lines.push("ALREADY MATCHING (will be left untouched, no rewrite): " + matching.length);
+    matching.forEach(m => lines.push(`  - categories/${m.canonical.key} → matches canonical exactly, skipped`));
+    lines.push("");
+    lines.push("CONFLICTS (will NOT be written, needs your decision): " + conflicts.length);
+    conflicts.forEach(c => {
+      lines.push(`  - categories/${c.canonical.key}`);
+      lines.push(`      canonical expected: label="${c.canonical.label}", categoryOrder=${c.canonical.categoryOrder}`);
+      lines.push(`      existing live doc:  label="${c.existing.label}", categoryOrder=${c.existing.categoryOrder}`);
+    });
+    lines.push("");
+    lines.push("blueelectric current state: " + (blueelectric ? `label="${blueelectric.label}", categoryOrder=${blueelectric.categoryOrder} (untouched by this tool)` : "NOT FOUND"));
+    lines.push("");
+    lines.push("Product collection count (read-only): " + productCount + (productCount === 37 ? " (matches expected 37)" : " ⚠ DOES NOT MATCH expected 37 — investigate before writing"));
+    lines.push("Strada (afjuzXhM2UbGpBmLiPAh) current category: " + (strada ? `"${strada.category}"` : "NOT FOUND") + (strada && strada.category === "Milk" ? " (unchanged, as expected)" : " ⚠ unexpected"));
+    lines.push("");
+    if (conflicts.length > 0) {
+      lines.push("⚠ CONFLICTS FOUND. Writing is disabled until conflicts are resolved by explicit decision.");
+      writeBtn.disabled = true;
+    } else if (toCreate.length === 0) {
+      lines.push("Nothing to write — all 7 canonical categories already exist and match.");
+      writeBtn.disabled = true;
+    } else {
+      lines.push(`Ready to write ${toCreate.length} missing categor${toCreate.length === 1 ? "y" : "ies"}. Click step 2 to proceed (will ask to confirm).`);
+      writeBtn.disabled = false;
+    }
+    lines.push("========================================================");
+
+    reportOut.value = lines.join("\n");
+    copyBtn.disabled = false;
+    statusEl.textContent = "Inspeksi selesai. Belum ada yang ditulis.";
+  } catch (err) {
+    statusEl.textContent = "GAGAL membaca data: " + err.message;
+  } finally {
+    inspectBtn.disabled = false;
+  }
+}
+
+async function writeMissing() {
+  if (!lastInspection) return;
+  if (lastInspection.conflicts.length > 0) {
+    alert("Ada konflik yang belum diselesaikan. Tidak akan menulis apa pun.");
+    return;
+  }
+  if (lastInspection.toCreate.length === 0) {
+    alert("Tidak ada yang perlu ditulis.");
+    return;
+  }
+
+  const list = lastInspection.toCreate.map(c => `categories/${c.key}`).join("\n");
+  const confirmed = confirm(
+    `Ini akan membuat ${lastInspection.toCreate.length} dokumen kategori baru:\n\n${list}\n\n` +
+    `Tidak ada dokumen lain (produk, blueelectric, dll) yang akan disentuh.\n\nLanjutkan?`
+  );
+  if (!confirmed) {
+    statusEl.textContent = "Dibatalkan. Tidak ada yang ditulis.";
+    return;
+  }
+
+  writeBtn.disabled = true;
+  statusEl.textContent = "Menulis kategori yang belum ada...";
+
+  const created = [];
+  const failed = [];
+  for (const c of lastInspection.toCreate) {
+    try {
+      await setDoc(doc(db, "categories", c.key), {
+        label: c.label,
+        categoryOrder: c.categoryOrder,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+      created.push(c.key);
+    } catch (err) {
+      failed.push({ key: c.key, error: err.message });
+    }
+  }
+
+  statusEl.textContent = "Menulis selesai. Membaca ulang untuk verifikasi...";
+
+  // Re-read semuanya buat verifikasi pasca-tulis (read-only dari titik ini).
+  const verifyLines = [];
+  verifyLines.push("");
+  verifyLines.push("========================================================");
+  verifyLines.push("WRITE RESULT + POST-WRITE VERIFICATION");
+  verifyLines.push("Generated: " + new Date().toISOString());
+  verifyLines.push("========================================================");
+  verifyLines.push("Created: " + (created.length ? created.map(k => "categories/" + k).join(", ") : "(none)"));
+  if (failed.length) {
+    verifyLines.push("FAILED: " + failed.map(f => `categories/${f.key} (${f.error})`).join(", "));
+  }
+  verifyLines.push("");
+
+  const allCatsSnap = await getDocs(collection(db, "categories"));
+  const allCats = allCatsSnap.docs.map(d => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => (a.categoryOrder ?? 99) - (b.categoryOrder ?? 99));
+  verifyLines.push("categories/ collection now contains " + allCats.length + " document(s):");
+  allCats.forEach(c => verifyLines.push(`  - ${c.id}: label="${c.label}", categoryOrder=${c.categoryOrder}`));
+
+  const canonicalOk = CANONICAL.every(c => allCats.some(a => a.id === c.key && a.label === c.label && a.categoryOrder === c.categoryOrder));
+  verifyLines.push("");
+  verifyLines.push("All 7 canonical categories present with correct values: " + (canonicalOk ? "YES" : "⚠ NO — check above"));
+
+  const blueSnap2 = await getDoc(doc(db, "categories", "blueelectric"));
+  verifyLines.push("blueelectric still exists unchanged: " + (blueSnap2.exists() ? "YES" : "⚠ NOT FOUND"));
+
+  const extraCats = allCats.filter(c => c.id !== "blueelectric" && !CANONICAL.some(cc => cc.key === c.id));
+  verifyLines.push("Unexpected extra category documents: " + (extraCats.length === 0 ? "NONE" : extraCats.map(c => c.id).join(", ")));
+
+  const productsSnap2 = await getDocs(collection(db, "products"));
+  verifyLines.push("");
+  verifyLines.push("Product collection count after write: " + productsSnap2.size + (productsSnap2.size === 37 ? " (unchanged, matches expected 37)" : " ⚠ CHANGED — investigate"));
+
+  const stradaSnap2 = await getDoc(doc(db, "products", STRADA_ID));
+  const strada2 = stradaSnap2.exists() ? { id: stradaSnap2.id, ...stradaSnap2.data() } : null;
+  verifyLines.push("Strada category after write: " + (strada2 ? `"${strada2.category}"` : "NOT FOUND") + (strada2 && strada2.category === "Milk" ? " (unchanged, as expected)" : " ⚠ unexpected"));
+
+  verifyLines.push("========================================================");
+
+  reportOut.value += "\n" + verifyLines.join("\n");
+  statusEl.textContent = `Selesai. ${created.length} kategori dibuat, ${failed.length} gagal. Verifikasi pasca-tulis sudah ditambahkan ke laporan.`;
+  copyBtn.disabled = false;
+}
+
+inspectBtn.addEventListener("click", inspect);
+writeBtn.addEventListener("click", writeMissing);
+copyBtn.addEventListener("click", async () => {
+  try {
+    await navigator.clipboard.writeText(reportOut.value);
+    statusEl.textContent = "Report disalin ke clipboard. Silakan paste ke chat.";
+  } catch (err) {
+    reportOut.select();
+    document.execCommand("copy");
+    statusEl.textContent = "Report disalin (fallback method). Silakan paste ke chat.";
+  }
+});
+</script>
+</body>
+</html>
