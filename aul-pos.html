@@ -364,15 +364,28 @@ const RECIPE_MAP = {}; // key: "catKey|Nama Produk" -> recipe array [{ingredient
 const MODIFIER_MAP = {};
 
 async function loadMenuFromFirestore() {
+  // Step 3 — Category Master visual metadata: baca "categories" sekali di awal
+  // (one-time getDocs, arsitektur sama kayak products di bawah — BUKAN
+  // onSnapshot/realtime). CATEGORY_COLOR (hardcoded) TETAP dipertahankan
+  // sebagai fallback kalau Category Master belum punya "color" untuk key
+  // tertentu (misal "blueelectric" yang sengaja dibiarkan kosong).
+  const categoriesSnap = await getDocs(collection(db, "categories"));
+  const CATEGORY_MASTER_MAP = {};
+  categoriesSnap.forEach(docSnap => {
+    CATEGORY_MASTER_MAP[docSnap.id] = docSnap.data();
+  });
+
   const snap = await getDocs(collection(db, "products"));
   const byCategory = {};
   snap.forEach(docSnap => {
     const d = docSnap.data();
     if (!byCategory[d.category]) {
+      const masterCat = CATEGORY_MASTER_MAP[d.category];
+      const masterColor = masterCat && masterCat.color;
       byCategory[d.category] = {
         cat: d.categoryLabel || d.category,
         key: d.category,
-        color: CATEGORY_COLOR[d.category] || "var(--gold)",
+        color: masterColor || CATEGORY_COLOR[d.category] || "var(--gold)",
         catOrder: d.categoryOrder || 99,
         items: [],
       };
