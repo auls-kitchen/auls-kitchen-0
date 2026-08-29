@@ -40,13 +40,16 @@
 
 <h1>Category Diagnostic — READ ONLY</h1>
 <p class="sub">
-  Temporary utility for Scope 1B live data inspection. This page performs Firestore
+  Temporary utility for Scope 1B / Scope 2 live data inspection. This page performs Firestore
   <strong>reads only</strong> (getDocs on "products" and "categories", plus a targeted getDoc on
   status/soldOut and on a single product by ID for Scope 1B.2) — no setDoc, updateDoc, addDoc,
-  deleteDoc, arrayUnion/arrayRemove, or batch writes exist anywhere in this file. It does not
-  touch transactions, purchases, expenses, or any other collection, and it does not modify the
-  production Admin, POS, Online Menu, or Customer Display files. Delete this file after Scope 1B
-  is finished — it is not meant to be a permanent feature.
+  deleteDoc, arrayUnion/arrayRemove, or batch writes exist anywhere in this file. The Scope 2
+  modifier inventory section performs <strong>zero additional Firestore reads</strong> — it reads
+  the modifierGroups field from products already fetched by the existing products read, since
+  Firestore always returns every field on a document regardless of which fields the code
+  destructures. It does not touch transactions, purchases, expenses, or any other collection, and
+  it does not modify the production Admin, POS, Online Menu, or Customer Display files. Delete
+  this file after these scopes are finished — it is not meant to be a permanent feature.
 </p>
 <div class="warn">
   ⚠️ READ-ONLY DIAGNOSTIC. This tool cannot and does not write, delete, or migrate anything.
@@ -356,6 +359,81 @@ async function runDiagnostic() {
   }
   lines.push(`itemOrder collision risk: ${itemOrderCollision}`);
   lines.push("Other confirmed technical risk: none beyond what was already reported in Scope 1B.1 (CATEGORY_COLOR/CATEGORY_META fallback rendering, non-deterministic section ordering when categoryOrder ties, no impact to historical transactions since they store categoryLabel snapshot, not the category key).");
+
+  // ---------- 10. MODIFIER DATA INVENTORY (Scope 2 pre-implementation check) ----------
+  // Catatan: section ini TIDAK melakukan Firestore read baru sama sekali —
+  // Firestore selalu mengembalikan SEMUA field sebuah dokumen, jadi
+  // productDocs (dari getDocs collection "products" di section 1) sudah
+  // otomatis membawa field modifierGroups kalau ada, walau kode di section 1
+  // nggak secara eksplisit "meminta" field itu. Section ini murni membaca
+  // ulang data yang sudah ada di memory, read-only, nol Firestore call baru.
+  lines.push("");
+  lines.push("--------------------------------------------------------");
+  lines.push("10. MODIFIER DATA INVENTORY (products.modifierGroups[], read-only, no new Firestore reads)");
+  lines.push("--------------------------------------------------------");
+
+  const KNOWN_TEST_FIXTURE_IDS = ["afjuzXhM2UbGpBmLiPAh"]; // Strada
+  const KNOWN_TEST_NAME_HINTS = ["test"];
+
+  function isKnownTestFixture(p) {
+    if (KNOWN_TEST_FIXTURE_IDS.includes(p.id)) return true;
+    const n = (p.name || "").toLowerCase();
+    return KNOWN_TEST_NAME_HINTS.some(hint => n.includes(hint));
+  }
+
+  const withModifiers = productDocs.filter(p => Array.isArray(p.modifierGroups) && p.modifierGroups.length > 0);
+  const withoutModifiers = productDocs.filter(p => !Array.isArray(p.modifierGroups) || p.modifierGroups.length === 0);
+
+  lines.push(`Products with at least one modifier group: ${withModifiers.length}`);
+  lines.push(`Products with NO modifier groups: ${withoutModifiers.length}`);
+  lines.push("");
+
+  if (withModifiers.length === 0) {
+    lines.push("No product currently has any modifierGroups data — nothing to inventory further.");
+  } else {
+    withModifiers.forEach(p => {
+      const flag = isKnownTestFixture(p) ? "  ⚠ KNOWN TEST/DUMMY FIXTURE" : "";
+      lines.push(`PRODUCT: "${p.name || p.id}" (id: ${p.id}, category: ${displayOrEmpty(p.category)})${flag}`);
+      p.modifierGroups.forEach((g, gi) => {
+        const expectedGroupKeys = ["id", "name", "selectionType", "required", "options"];
+        const actualGroupKeys = Object.keys(g);
+        const unexpectedGroupKeys = actualGroupKeys.filter(k => !expectedGroupKeys.includes(k));
+        lines.push(`  Group ${gi + 1}: name="${displayOrEmpty(g.name)}", selectionType="${displayOrEmpty(g.selectionType)}", required=${g.required === true}`);
+        if (unexpectedGroupKeys.length > 0) {
+          lines.push(`    ⚠ Unexpected/legacy fields on this group: ${unexpectedGroupKeys.join(", ")}`);
+        }
+        const options = Array.isArray(g.options) ? g.options : [];
+        if (options.length === 0) {
+          lines.push(`    ⚠ Group has no options.`);
+        }
+        options.forEach((o, oi) => {
+          const expectedOptKeys = ["id", "name", "price", "isDefault", "recipe"];
+          const actualOptKeys = Object.keys(o);
+          const unexpectedOptKeys = actualOptKeys.filter(k => !expectedOptKeys.includes(k));
+          const recipeLen = Array.isArray(o.recipe) ? o.recipe.length : 0;
+          lines.push(`    Option ${oi + 1}: name="${displayOrEmpty(o.name)}", price=${displayOrEmpty(o.price)}, isDefault=${o.isDefault === true}, recipe entries=${recipeLen}`);
+          if (unexpectedOptKeys.length > 0) {
+            lines.push(`      ⚠ Unexpected/legacy fields on this option: ${unexpectedOptKeys.join(", ")}`);
+          }
+        });
+      });
+      lines.push("");
+    });
+  }
+
+  lines.push("Known hardcoded POS modifier data (OPTION_GROUPS) — NOT in Firestore, lives only in aul-pos.html source code:");
+  lines.push('  coffee: [Less Sugar +0, Less Ice +0, Double Shot +3000, Stand Alone +2000]');
+  lines.push('  default (all other categories): [Stand Alone +2000]');
+  lines.push("  This is static source code, not live data — cannot be inspected via Firestore reads, already fully traced in the Scope 2 report.");
+  lines.push("");
+  lines.push("LIMITATION: Firestore's client SDK has no \"list all collections\" capability for security reasons —");
+  lines.push("this diagnostic can only read collections it already knows the name of (products, categories, status).");
+  lines.push("If an orphan/legacy standalone \"modifiers\" collection or similar exists that no application code");
+  lines.push("references, it cannot be discovered this way. Static source search already confirmed no code in");
+  lines.push("aul-adm.html, aul-pos.html, index.html, auls-kitchen-menu.html, or customer-display.html ever");
+  lines.push("references any collection name other than: products, ingredients, categories, transactions, expenses,");
+  lines.push("purchases, status — so no application-connected \"modifiers\" collection exists. An entirely orphaned,");
+  lines.push("code-disconnected collection (if any) would need to be checked directly via the Firebase Console.");
 
   lines.push("");
   lines.push("========================================================");
