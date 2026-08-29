@@ -812,6 +812,27 @@ function deductStockForTicket(ticketItems) {
       if (!row.ingredientId || !row.qty) return;
       totalDeduct[row.ingredientId] = (totalDeduct[row.ingredientId] || 0) + row.qty * item.qty;
     });
+
+    // Scope 2B: modifier recipe (kalau ada) ikut dikurangi, ADDITIF ke
+    // totalDeduct yang sama persis dengan base recipe di atas — bukan
+    // accumulator terpisah, bukan write loop terpisah. Resep modifier
+    // di-lookup ulang dari MODIFIER_MAP (bukan disimpan di cart item),
+    // sama persis dengan cara base recipe di-lookup dari RECIPE_MAP.
+    if (item.options && item.options.length) {
+      const groups = MODIFIER_MAP[`${item.catKey}|${item.name}`] || [];
+      item.options.forEach(selectedOption => {
+        const group = groups.find(g => g.id === selectedOption.groupId);
+        if (!group) return; // grup nggak ketemu (data berubah setelah dipilih), skip aman
+        const option = (group.options || []).find(o => o.id === selectedOption.optionId);
+        if (!option) return; // opsi nggak ketemu, skip aman
+        const modifierRecipe = option.recipe;
+        if (!modifierRecipe || modifierRecipe.length === 0) return; // opsi ini nggak punya resep, skip
+        modifierRecipe.forEach(row => {
+          if (!row.ingredientId || !row.qty) return; // guard sama persis kayak base recipe
+          totalDeduct[row.ingredientId] = (totalDeduct[row.ingredientId] || 0) + row.qty * item.qty;
+        });
+      });
+    }
   });
 
   Object.entries(totalDeduct).forEach(([ingredientId, qty]) => {
