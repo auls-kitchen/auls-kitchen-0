@@ -97,6 +97,13 @@
     width:100%; background:var(--green); color:#fff; border:none; padding:13px;
     border-radius:20px; font-weight:600; font-size:14px; cursor:pointer; margin-bottom:18px;
   }
+  .product-toolbar-row{ display:flex; gap:8px; margin-bottom:18px; }
+  .product-toolbar-row .add-expense-btn{ margin-bottom:0; }
+  .product-toolbar-row .category-mgmt-btn{
+    flex:0 0 auto; width:auto; padding-left:18px; padding-right:18px;
+    background:var(--surface-hi); border:1px solid var(--green); color:var(--yellow);
+  }
+  .product-toolbar-row #addProductBtn{ flex:1; }
   .expense-row{
     display:flex; justify-content:space-between; align-items:center;
     padding:12px 0; border-bottom:1px solid var(--line); gap:10px;
@@ -124,6 +131,12 @@
     padding:12px 14px; color:var(--cream); font-family:'Plus Jakarta Sans', sans-serif; font-size:14px; outline:none;
   }
   .field-input:focus{ border-color:var(--green-dim); }
+  .field-input[readonly]{ opacity:0.65; cursor:not-allowed; }
+  select.field-input option:disabled{ color:var(--yellow); }
+  .category-legacy-warning{
+    margin-top:8px; padding:10px 12px; border-radius:10px; font-size:12px; line-height:1.5;
+    background:rgba(232,163,61,0.12); border:1px solid var(--yellow); color:var(--yellow);
+  }
   .expense-modal-actions{ display:flex; gap:10px; margin-top:18px; }
   .modal-cancel{ flex:1; padding:12px; border-radius:20px; background:var(--surface); border:1px solid var(--line); color:var(--muted); cursor:pointer; }
   .modal-confirm{ flex:1.4; padding:12px; border-radius:20px; background:var(--green); border:none; color:#fff; font-weight:600; cursor:pointer; }
@@ -440,17 +453,18 @@
       <input type="number" inputmode="numeric" class="field-input" id="pPrice" placeholder="0">
     </div>
     <div class="field-group">
-      <label>Category Key</label>
-      <input type="text" class="field-input" id="pCategory" placeholder="Contoh: coffee">
+      <label>Kategori</label>
+      <select class="field-input" id="pCategory"></select>
+      <div id="pCategoryLegacyWarning" class="category-legacy-warning" style="display:none;"></div>
     </div>
     <div class="field-group">
       <label>Category Label</label>
-      <input type="text" class="field-input" id="pCategoryLabel" placeholder="Contoh: Coffee Latte">
+      <input type="text" class="field-input" id="pCategoryLabel" placeholder="Contoh: Coffee Latte" readonly>
     </div>
     <div style="display:flex; gap:10px;">
       <div class="field-group" style="flex:1;">
         <label>Category Order</label>
-        <input type="number" inputmode="numeric" class="field-input" id="pCategoryOrder" placeholder="1">
+        <input type="number" inputmode="numeric" class="field-input" id="pCategoryOrder" placeholder="1" readonly>
       </div>
       <div class="field-group" style="flex:1;">
         <label>Item Order</label>
@@ -486,11 +500,46 @@
   </div>
 </div>
 
+<!-- MODAL KATEGORI: LIST -->
+<div class="modal-overlay" id="categoryListModalOverlay">
+  <div class="expense-modal">
+    <div class="expense-modal-title display">Kategori Produk</div>
+    <button class="add-expense-btn" id="addCategoryBtn">+ Tambah Kategori</button>
+    <div id="categoryListRows"></div>
+    <div class="expense-modal-actions">
+      <button class="modal-cancel" id="categoryListCloseBtn">Tutup</button>
+    </div>
+  </div>
+</div>
+
+<!-- MODAL KATEGORI: TAMBAH/EDIT -->
+<div class="modal-overlay" id="categoryFormModalOverlay">
+  <div class="expense-modal">
+    <div class="expense-modal-title display" id="categoryFormTitle">Tambah Kategori</div>
+    <div class="field-group">
+      <label>Key Kategori (unik, tidak bisa diubah)</label>
+      <input type="text" class="field-input" id="catKey" placeholder="Contoh: coffee">
+    </div>
+    <div class="field-group">
+      <label>Label / Nama Tampilan</label>
+      <input type="text" class="field-input" id="catLabel" placeholder="Contoh: Coffee Latte">
+    </div>
+    <div class="field-group">
+      <label>Category Order</label>
+      <input type="number" inputmode="numeric" class="field-input" id="catOrder" placeholder="1">
+    </div>
+    <div class="expense-modal-actions">
+      <button class="modal-cancel" id="categoryFormCancelBtn">Batal</button>
+      <button class="modal-confirm" id="categoryFormSaveBtn">Simpan Kategori</button>
+    </div>
+  </div>
+</div>
+
 <script type="module">
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import {
   getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc as firestoreDoc,
-  updateDoc, getDocs, serverTimestamp
+  updateDoc, getDocs, getDoc, setDoc, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
 const firebaseConfig = {
@@ -1085,6 +1134,124 @@ onSnapshot(collection(db, "products"), snap => {
 }, err => console.error("Gagal memuat produk:", err));
 
 // =========================================================
+// KATEGORI PRODUK (Category Master) — Scope 1A
+// Koleksi baru "categories/{categoryKey}". Doc ID = key stabil yang sudah
+// dipakai di field product.category (bukan auto-generated ID), supaya
+// arsitektur existing (POS/Online Menu baca product.category sebagai
+// string key) TIDAK perlu diubah sama sekali di scope ini.
+// =========================================================
+let allCategories = [];
+
+onSnapshot(collection(db, "categories"), snap => {
+  allCategories = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }))
+    .sort((a, b) => (a.categoryOrder || 99) - (b.categoryOrder || 99));
+  if (categoryListModalOverlay.classList.contains("show")) renderCategoryList();
+}, err => console.error("Gagal memuat kategori:", err));
+
+const categoryListModalOverlay = document.getElementById("categoryListModalOverlay");
+const categoryFormModalOverlay = document.getElementById("categoryFormModalOverlay");
+let currentEditingCategoryKey = null; // null = mode tambah
+
+function openCategoryListModal() {
+  renderCategoryList();
+  categoryListModalOverlay.classList.add("show");
+}
+document.getElementById("categoryListCloseBtn").addEventListener("click", () => {
+  categoryListModalOverlay.classList.remove("show");
+});
+
+function renderCategoryList() {
+  const rowsEl = document.getElementById("categoryListRows");
+  if (allCategories.length === 0) {
+    rowsEl.innerHTML = '<div class="empty-msg">Belum ada kategori. Tambah kategori baru di atas.</div>';
+    return;
+  }
+  rowsEl.innerHTML = allCategories.map(c => `
+    <div class="product-list-item" data-key="${c.id}">
+      <div class="product-list-info">
+        <div class="product-list-name">${c.label || c.id}</div>
+        <div class="product-list-meta">key: ${c.id} · urutan: ${c.categoryOrder != null ? c.categoryOrder : "-"}</div>
+      </div>
+      <div class="product-list-actions">
+        <button data-action="edit-cat">Edit</button>
+      </div>
+    </div>
+  `).join("");
+  rowsEl.querySelectorAll('[data-action="edit-cat"]').forEach(btn => {
+    btn.addEventListener("click", () => {
+      const key = btn.closest(".product-list-item").dataset.key;
+      openCategoryFormModal(key);
+    });
+  });
+}
+
+document.getElementById("addCategoryBtn").addEventListener("click", () => openCategoryFormModal(null));
+
+function openCategoryFormModal(categoryKey) {
+  currentEditingCategoryKey = categoryKey;
+  const cat = categoryKey ? allCategories.find(c => c.id === categoryKey) : null;
+
+  document.getElementById("categoryFormTitle").textContent = categoryKey ? "Edit Kategori" : "Tambah Kategori";
+  const keyInput = document.getElementById("catKey");
+  keyInput.value = cat ? cat.id : "";
+  keyInput.disabled = !!categoryKey; // key tidak bisa diubah saat edit (dia doc ID)
+  document.getElementById("catLabel").value = cat ? (cat.label || "") : "";
+  document.getElementById("catOrder").value = cat ? (cat.categoryOrder != null ? cat.categoryOrder : "") : "";
+
+  categoryFormModalOverlay.classList.add("show");
+}
+document.getElementById("categoryFormCancelBtn").addEventListener("click", () => {
+  categoryFormModalOverlay.classList.remove("show");
+});
+
+document.getElementById("categoryFormSaveBtn").addEventListener("click", async () => {
+  const rawKey = document.getElementById("catKey").value.trim();
+  const label = document.getElementById("catLabel").value.trim();
+  const categoryOrder = Number(document.getElementById("catOrder").value) || 99;
+
+  if (!rawKey || !label) {
+    alert("Key dan Label kategori harus diisi.");
+    return;
+  }
+  // key dipakai sebagai Firestore doc ID DAN sebagai product.category string —
+  // batasi ke karakter aman (huruf/angka/underscore/dash) biar konsisten dengan
+  // pola key yang sudah dipakai (contoh: "coffee", "milky").
+  if (!/^[a-zA-Z0-9_-]+$/.test(rawKey)) {
+    alert("Key kategori hanya boleh huruf, angka, underscore, atau dash (tanpa spasi).");
+    return;
+  }
+
+  const saveBtn = document.getElementById("categoryFormSaveBtn");
+  saveBtn.disabled = true;
+  try {
+    const catDocRef = firestoreDoc(db, "categories", rawKey);
+
+    if (!currentEditingCategoryKey) {
+      // mode tambah: cek langsung ke Firestore (bukan cuma cache lokal) supaya
+      // tetap aman kalau ada client lain yang input bersamaan — sama seperti
+      // pola cek duplikat bahan baku/produk.
+      const existing = await getDoc(catDocRef);
+      if (existing.exists()) {
+        alert(`Kategori dengan key "${rawKey}" sudah ada. Key kategori harus unik.`);
+        return;
+      }
+      await setDoc(catDocRef, {
+        label, categoryOrder,
+        createdAt: serverTimestamp(), updatedAt: serverTimestamp(),
+      });
+    } else {
+      // mode edit: key (doc ID) tidak berubah, hanya update label/order.
+      await updateDoc(catDocRef, { label, categoryOrder, updatedAt: serverTimestamp() });
+    }
+    categoryFormModalOverlay.classList.remove("show");
+  } catch (err) {
+    alert("Gagal simpan kategori: " + err.message);
+  } finally {
+    saveBtn.disabled = false;
+  }
+});
+
+// =========================================================
 // PRODUK (Master Produk CRUD + Foto + Resep + Modifier)
 // =========================================================
 let productSearchTerm = "";
@@ -1116,12 +1283,16 @@ function renderProducts() {
   `).join("");
 
   content.innerHTML = `
-    <button class="add-expense-btn" id="addProductBtn">+ Tambah Produk</button>
+    <div class="product-toolbar-row">
+      <button class="add-expense-btn" id="addProductBtn">+ Tambah Produk</button>
+      <button class="add-expense-btn category-mgmt-btn" id="openCategoryMgmtBtn">Kategori</button>
+    </div>
     <input type="text" class="product-search" id="productSearchInput" placeholder="Cari produk..." value="${productSearchTerm}">
     ${filtered.length === 0 ? '<div class="empty-msg">Produk tidak ditemukan.</div>' : rows}
   `;
 
   document.getElementById("addProductBtn").addEventListener("click", () => openProductModal(null));
+  document.getElementById("openCategoryMgmtBtn").addEventListener("click", () => openCategoryListModal());
   document.getElementById("productSearchInput").addEventListener("input", (e) => {
     productSearchTerm = e.target.value;
     const scrollPos = window.scrollY;
@@ -1153,6 +1324,70 @@ function deleteProductImage(product) {
   return Promise.resolve();
 }
 
+// ---------- kategori dropdown di form produk (Scope 1D) ----------
+// Reuse allCategories (sudah live-synced dari onSnapshot Scope 1A) — TIDAK bikin
+// listener baru. Dropdown ini satu-satunya cara pilih category; tidak ada lagi
+// input text bebas, jadi form produk secara struktural TIDAK BISA membuat
+// kategori baru (itu cuma bisa lewat Category Management).
+function populateCategoryDropdown(product) {
+  const select = document.getElementById("pCategory");
+  const warningEl = document.getElementById("pCategoryLegacyWarning");
+  select.innerHTML = "";
+  warningEl.style.display = "none";
+  warningEl.textContent = "";
+
+  const currentValue = product ? product.category : null;
+  const matched = currentValue ? allCategories.some(c => c.id === currentValue) : false;
+
+  if (!product) {
+    // Tambah produk baru: WAJIB pilih eksplisit, nggak ada default yang kepilih.
+    const placeholder = document.createElement("option");
+    placeholder.value = "";
+    placeholder.textContent = "-- Pilih Kategori --";
+    placeholder.disabled = true;
+    placeholder.selected = true;
+    select.appendChild(placeholder);
+  } else if (!matched) {
+    // Produk existing tapi category-nya nggak ada di Category Master (legacy/typo/test).
+    // Tampilkan apa adanya, JANGAN diam-diam ganti ke kategori lain.
+    const legacyOpt = document.createElement("option");
+    legacyOpt.value = currentValue || "";
+    legacyOpt.textContent = `⚠ Legacy: "${currentValue}" (tidak ada di Category Master)`;
+    legacyOpt.disabled = true;
+    legacyOpt.selected = true;
+    select.appendChild(legacyOpt);
+
+    warningEl.textContent = `⚠ Kategori produk ini ("${currentValue}") tidak terdaftar di Category Master. Produk TIDAK BISA disimpan sampai kategori yang valid dipilih dari daftar di bawah.`;
+    warningEl.style.display = "block";
+  }
+
+  allCategories.forEach(c => {
+    const opt = document.createElement("option");
+    opt.value = c.id;
+    opt.textContent = c.label;
+    if (matched && currentValue === c.id) opt.selected = true;
+    select.appendChild(opt);
+  });
+
+  // kalau match, samakan label/order display dengan Category Master saat ini.
+  // kalau legacy/placeholder, JANGAN disentuh — biarkan nilai lama (di-set oleh
+  // openProductModal sebelum fungsi ini dipanggil) tetap tampil apa adanya.
+  if (matched) {
+    updateCategoryLabelOrderFields();
+  }
+}
+
+function updateCategoryLabelOrderFields() {
+  const select = document.getElementById("pCategory");
+  const cat = allCategories.find(c => c.id === select.value);
+  if (cat) {
+    document.getElementById("pCategoryLabel").value = cat.label;
+    document.getElementById("pCategoryOrder").value = cat.categoryOrder;
+    document.getElementById("pCategoryLegacyWarning").style.display = "none";
+  }
+}
+document.getElementById("pCategory").addEventListener("change", updateCategoryLabelOrderFields);
+
 // ---------- modal add/edit produk ----------
 const productModalOverlay = document.getElementById("productModalOverlay");
 
@@ -1164,10 +1399,10 @@ function openProductModal(productId) {
   document.getElementById("productModalTitle").textContent = productId ? "Edit Produk" : "Tambah Produk";
   document.getElementById("pName").value = product ? product.name : "";
   document.getElementById("pPrice").value = product ? product.price : "";
-  document.getElementById("pCategory").value = product ? product.category : "";
   document.getElementById("pCategoryLabel").value = product ? product.categoryLabel : "";
   document.getElementById("pCategoryOrder").value = product ? product.categoryOrder : "";
   document.getElementById("pItemOrder").value = product ? product.itemOrder : "";
+  populateCategoryDropdown(product);
 
   currentProductPhotoUrl = product ? product.imageUrl || null : null;
   const img = document.getElementById("photoPreviewImg");
@@ -1429,15 +1664,27 @@ async function uploadToCloudinary(blob) {
 document.getElementById("productSaveBtn").addEventListener("click", async () => {
   const name = document.getElementById("pName").value.trim();
   const price = Number(document.getElementById("pPrice").value) || 0;
-  const category = document.getElementById("pCategory").value.trim();
-  const categoryLabel = document.getElementById("pCategoryLabel").value.trim();
-  const categoryOrder = Number(document.getElementById("pCategoryOrder").value) || 99;
   const itemOrder = Number(document.getElementById("pItemOrder").value) || 99;
 
-  if (!name || !category || price <= 0) {
-    alert("Nama, Category Key, dan Harga harus diisi dengan benar.");
+  // Scope 1D — defense in depth: JANGAN percaya pCategoryLabel/pCategoryOrder
+  // dari DOM. Ambil ulang category key dari dropdown, lalu cari lagi di
+  // allCategories (sumber kebenaran yang sama dengan Category Management).
+  // Ini mencegah kombinasi category=B tapi categoryLabel/categoryOrder masih
+  // punya nilai A yang lama.
+  const categoryKey = document.getElementById("pCategory").value;
+  const selectedCat = allCategories.find(c => c.id === categoryKey);
+
+  if (!name || price <= 0) {
+    alert("Nama dan Harga harus diisi dengan benar.");
     return;
   }
+  if (!categoryKey || !selectedCat) {
+    alert("Produk harus dipilih ke kategori yang valid dari Category Master sebelum bisa disimpan. Kategori lama/tidak dikenal (legacy) tidak bisa langsung disimpan ulang — pilih salah satu kategori dari daftar terlebih dahulu.");
+    return;
+  }
+  const category = selectedCat.id;
+  const categoryLabel = selectedCat.label;
+  const categoryOrder = selectedCat.categoryOrder;
 
   const saveBtn = document.getElementById("productSaveBtn");
   saveBtn.disabled = true;
