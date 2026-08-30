@@ -160,6 +160,7 @@
   .lr-row strong{ font-family:'JetBrains Mono', monospace; font-size:1.1rem; }
   .lr-positive{ color:var(--cream); }
   .lr-negative{ color:#E8544A; }
+  .lr-muted{ color:var(--muted); font-style:italic; }
   .lr-divider{ border-top:1px solid var(--line); margin:6px 0; }
   .lr-final{ padding-top:14px; }
   .lr-final span{ font-size:15px; font-weight:700; color:var(--cream); text-transform:uppercase; letter-spacing:0.05em; font-family:'JetBrains Mono', monospace; }
@@ -686,23 +687,33 @@ function renderLabaRugi() {
   const omzet = filteredTx.reduce((s, tx) => s + (tx.total || 0), 0);
   const pengeluaran = filteredEx.reduce((s, ex) => s + (ex.amount || 0), 0);
 
-  // HPP: dari transactions[].items[] -> cocokkan ke products by name -> products.recipe -> computeHpp()
-  let hpp = 0;
-  let missingRecipeCount = 0;
+  // Historical Financial Integrity - Phase B: HPP dibaca LANGSUNG dari
+  // item.hppSnapshot.itemTotalHpp (dibekukan saat checkout, Phase A) untuk
+  // transaksi yang punya snapshot. TIDAK ADA lagi allProducts.find() /
+  // computeHpp() di sini - itu akan mengubah histori tiap kali master data
+  // berubah, persis yang mau dicegah. Transaksi lama (sebelum Phase A,
+  // tidak punya hppSnapshot) HPP-nya UNAVAILABLE - TIDAK PERNAH di-
+  // computeHpp() sebagai pengganti, supaya nggak menciptakan historical
+  // fact yang sebenarnya nggak pernah tersimpan. Karena checkout Phase A
+  // membekukan hppSnapshot ke SEMUA item sekaligus (block-seluruh-tiket
+  // kalau ada yang gagal), satu transaksi selalu 100% snapshot-backed atau
+  // 100% tidak - nggak pernah campuran di dalam satu transaksi yang sama.
+  let hppKnown = 0;
+  let snapshotTxCount = 0;
+  let oldTxCount = 0;
   filteredTx.forEach(tx => {
-    (tx.items || []).forEach(item => {
-      const product = allProducts.find(p => p.name === item.name);
-      const hppPerUnit = computeHpp(product ? product.recipe : null); // null = belum ada resep
-      if (hppPerUnit === null) {
-        missingRecipeCount++;
-      } else {
-        hpp += hppPerUnit * (item.qty || 0);
-      }
-    });
+    const items = tx.items || [];
+    const isSnapshotBacked = items.length > 0 && items.every(item => item.hppSnapshot);
+    if (isSnapshotBacked) {
+      snapshotTxCount++;
+      items.forEach(item => { hppKnown += item.hppSnapshot.itemTotalHpp; });
+    } else {
+      oldTxCount++;
+    }
   });
-
-  const labaKotor = omzet - hpp;
-  const labaBersih = labaKotor - pengeluaran;
+  const totalTxCount = filteredTx.length;
+  const hasOldTx = oldTxCount > 0;
+  const hasSnapshotTx = snapshotTxCount > 0;
 
   // rekap pengeluaran per kategori, biar kelihatan kemana aja uangnya kepake
   const byCategory = {};
@@ -718,34 +729,102 @@ function renderLabaRugi() {
       </div>
     `).join("");
 
-  content.innerHTML = `
-    ${missingRecipeCount > 0 ? `
-      <div class="labarugi-warning">
-        ⚠️ ${missingRecipeCount} item terjual belum bisa dihitung HPP-nya (produk belum punya resep) — dihitung Rp 0 sementara. HPP di bawah ini masih di bawah nilai sebenarnya.
+  // Historical Financial Integrity - Phase B: tiga kondisi tampilan sesuai
+  // Phase B contract - full snapshot, full old (unavailable), atau mixed
+  // (parsial, harus jelas ditandai, jangan ditampilkan seolah lengkap).
+  let warningHtml, hppRowsHtml;
+
+  if (!hasOldTx) {
+    // Case 1: seluruhnya snapshot-backed (atau nggak ada transaksi sama sekali)
+    const labaKotor = omzet - hppKnown;
+    const labaBersih = labaKotor - pengeluaran;
+    warningHtml = "";
+    hppRowsHtml = `
+      <div class="lr-row">
+        <span>HPP</span>
+        <strong class="lr-negative">- ${fmt(hppKnown)}</strong>
       </div>
-    ` : ""}
+      <div class="lr-divider"></div>
+      <div class="lr-row lr-final">
+        <span>Laba Kotor</span>
+        <strong class="${labaKotor >= 0 ? 'lr-positive' : 'lr-negative'}">${fmt(labaKotor)}</strong>
+      </div>
+      <div class="lr-row" style="margin-top:16px;">
+        <span>Pengeluaran Operasional</span>
+        <strong class="lr-negative">- ${fmt(pengeluaran)}</strong>
+      </div>
+      <div class="lr-divider"></div>
+      <div class="lr-row lr-final">
+        <span>Estimasi Laba Bersih</span>
+        <strong class="${labaBersih >= 0 ? 'lr-positive' : 'lr-negative'}">${fmt(labaBersih)}</strong>
+      </div>
+    `;
+  } else if (!hasSnapshotTx) {
+    // Case 2: seluruhnya transaksi lama - HPP historis belum tersedia sama sekali
+    warningHtml = `
+      <div class="labarugi-warning">
+        ⚠️ HPP historis belum tersedia untuk periode ini (${oldTxCount} dari ${totalTxCount} transaksi adalah transaksi lama, sebelum data HPP historis mulai dicatat). Laba Kotor dan Estimasi Laba Bersih tidak dapat dihitung untuk periode ini.
+      </div>
+    `;
+    hppRowsHtml = `
+      <div class="lr-row">
+        <span>HPP</span>
+        <strong class="lr-muted">Tidak tersedia</strong>
+      </div>
+      <div class="lr-divider"></div>
+      <div class="lr-row lr-final">
+        <span>Laba Kotor</span>
+        <strong class="lr-muted">Tidak tersedia</strong>
+      </div>
+      <div class="lr-row" style="margin-top:16px;">
+        <span>Pengeluaran Operasional</span>
+        <strong class="lr-negative">- ${fmt(pengeluaran)}</strong>
+      </div>
+      <div class="lr-divider"></div>
+      <div class="lr-row lr-final">
+        <span>Estimasi Laba Bersih</span>
+        <strong class="lr-muted">Tidak tersedia</strong>
+      </div>
+    `;
+  } else {
+    // Case 3: campuran - HPP hanya mencakup transaksi yang punya snapshot,
+    // harus jelas ditandai PARSIAL, jangan ditampilkan seolah lengkap.
+    const labaKotorPartial = omzet - hppKnown;
+    const labaBersihPartial = labaKotorPartial - pengeluaran;
+    warningHtml = `
+      <div class="labarugi-warning">
+        ⚠️ HPP untuk periode ini baru mencakup ${snapshotTxCount} dari ${totalTxCount} transaksi (${oldTxCount} transaksi lama belum punya data HPP historis). Angka HPP, Laba Kotor, dan Estimasi Laba Bersih di bawah ini masih PARSIAL, bukan hasil akhir periode ini.
+      </div>
+    `;
+    hppRowsHtml = `
+      <div class="lr-row">
+        <span>HPP (parsial)</span>
+        <strong class="lr-negative">- ${fmt(hppKnown)}</strong>
+      </div>
+      <div class="lr-divider"></div>
+      <div class="lr-row lr-final">
+        <span>Laba Kotor (parsial)</span>
+        <strong class="${labaKotorPartial >= 0 ? 'lr-positive' : 'lr-negative'}">${fmt(labaKotorPartial)}</strong>
+      </div>
+      <div class="lr-row" style="margin-top:16px;">
+        <span>Pengeluaran Operasional</span>
+        <strong class="lr-negative">- ${fmt(pengeluaran)}</strong>
+      </div>
+      <div class="lr-divider"></div>
+      <div class="lr-row lr-final">
+        <span>Estimasi Laba Bersih (parsial)</span>
+        <strong class="${labaBersihPartial >= 0 ? 'lr-positive' : 'lr-negative'}">${fmt(labaBersihPartial)}</strong>
+      </div>
+    `;
+  }
+
+  content.innerHTML = `
+    ${warningHtml}
     <div class="lr-row">
       <span>Omzet</span>
       <strong class="lr-positive">${fmt(omzet)}</strong>
     </div>
-    <div class="lr-row">
-      <span>HPP</span>
-      <strong class="lr-negative">- ${fmt(hpp)}</strong>
-    </div>
-    <div class="lr-divider"></div>
-    <div class="lr-row lr-final">
-      <span>Laba Kotor</span>
-      <strong class="${labaKotor >= 0 ? 'lr-positive' : 'lr-negative'}">${fmt(labaKotor)}</strong>
-    </div>
-    <div class="lr-row" style="margin-top:16px;">
-      <span>Pengeluaran Operasional</span>
-      <strong class="lr-negative">- ${fmt(pengeluaran)}</strong>
-    </div>
-    <div class="lr-divider"></div>
-    <div class="lr-row lr-final">
-      <span>Estimasi Laba Bersih</span>
-      <strong class="${labaBersih >= 0 ? 'lr-positive' : 'lr-negative'}">${fmt(labaBersih)}</strong>
-    </div>
+    ${hppRowsHtml}
     ${categoryRows ? `<div class="section-label">Pengeluaran per Kategori</div>${categoryRows}` : ""}
   `;
 }
