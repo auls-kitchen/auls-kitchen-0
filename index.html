@@ -754,17 +754,33 @@ const IMG_KEY_MAP = {
 let MENU = [];
 
 async function loadMenuFromFirestore() {
+  // Step 4 — Category Master visual metadata: baca "categories" sekali di awal
+  // (one-time getDocs, arsitektur sama kayak products di bawah — BUKAN
+  // onSnapshot/realtime, sama pola kayak Step 3 di aul-pos.html).
+  // CATEGORY_META (hardcoded) TETAP dipertahankan sebagai fallback kalau
+  // Category Master belum punya "color"/"note" untuk key tertentu.
+  // "color" dan "note" di-resolve SECARA INDEPENDEN — bukan "kalau ada
+  // Master document, pakai seluruh document-nya" — supaya kategori yang di
+  // Master baru punya salah satu field (misal color doang) tetap fallback
+  // yang benar untuk field yang satunya (note).
+  const categoriesSnap = await getDocs(collection(db, "categories"));
+  const CATEGORY_MASTER_MAP = {};
+  categoriesSnap.forEach(docSnap => {
+    CATEGORY_MASTER_MAP[docSnap.id] = docSnap.data();
+  });
+
   const snap = await getDocs(collection(db, "products"));
   const byCategory = {};
   snap.forEach(docSnap => {
     const d = docSnap.data();
     if (!byCategory[d.category]) {
-      const meta = CATEGORY_META[d.category] || {};
+      const masterCat = CATEGORY_MASTER_MAP[d.category];
+      const legacyMeta = CATEGORY_META[d.category] || {};
       byCategory[d.category] = {
         cat: d.categoryLabel || d.category,
         key: d.category,
-        color: meta.color || "var(--gold)",
-        note: meta.note || "",
+        color: (masterCat && masterCat.color) || legacyMeta.color || "var(--gold)",
+        note: (masterCat && masterCat.note) || legacyMeta.note || "",
         catOrder: d.categoryOrder || 99,
         items: [],
       };
