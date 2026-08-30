@@ -362,6 +362,11 @@ const RECIPE_MAP = {}; // key: "catKey|Nama Produk" -> recipe array [{ingredient
 // akan punya array kosong di sini, artinya nggak ada UI modifier sama sekali —
 // behavior lama untuk produk tanpa modifier TIDAK berubah.
 const MODIFIER_MAP = {};
+// Historical Financial Integrity - Phase A: lookup ingredient avgCost/name
+// untuk hppSnapshot capture di checkout. HANYA name + avgCost, TIDAK
+// termasuk stock (stock murni concern inventory/availability, bukan HPP).
+// key: ingredientId -> { name, avgCost }
+const INGREDIENT_MAP = {};
 
 async function loadMenuFromFirestore() {
   // Step 3 — Category Master visual metadata: baca "categories" sekali di awal
@@ -373,6 +378,16 @@ async function loadMenuFromFirestore() {
   const CATEGORY_MASTER_MAP = {};
   categoriesSnap.forEach(docSnap => {
     CATEGORY_MASTER_MAP[docSnap.id] = docSnap.data();
+  });
+
+  // Historical Financial Integrity - Phase A: baca "ingredients" sekali di
+  // awal (one-time getDocs, arsitektur sama kayak categories/products di
+  // atas/bawah - BUKAN onSnapshot/realtime). Dipakai HANYA untuk
+  // hppSnapshot capture saat checkout, bukan untuk stock/availability.
+  const ingredientsSnap = await getDocs(collection(db, "ingredients"));
+  ingredientsSnap.forEach(docSnap => {
+    const d = docSnap.data();
+    INGREDIENT_MAP[docSnap.id] = { name: d.name, avgCost: d.avgCost || 0 };
   });
 
   const snap = await getDocs(collection(db, "products"));
@@ -854,7 +869,89 @@ function deductStockForTicket(ticketItems) {
   });
 }
 
+// Historical Financial Integrity - Phase A: hitung hppSnapshot satu item
+// tiket, membekukan cost SAAT checkout supaya nggak pernah berubah lagi
+// walau avgCost/recipe master berubah di kemudian hari. Kalau ada
+// ingredientId (base ATAU modifier) yang nggak ketemu di INGREDIENT_MAP,
+// return { ok:false } - checkout untuk SELURUH tiket dibatalkan di
+// payConfirmBtn (bukan cuma item ini yang diam-diam di-skip).
+// Rounding: HANYA SATU Math.ceil(), di totalHppPerUnit. Tidak ada
+// pembulatan di level row/base/modifier manapun - persis sesuai locked
+// rule, konsisten sama computeHpp() yang udah ada di Admin.
+function resolveItemHppSnapshot(item) {
+  const baseRecipeRows = RECIPE_MAP[`${item.catKey}|${item.name}`] || [];
+  const groups = MODIFIER_MAP[`${item.catKey}|${item.name}`] || [];
+
+  const baseRecipe = [];
+  for (const row of baseRecipeRows) {
+    const ing = INGREDIENT_MAP[row.ingredientId];
+    if (!ing) return { ok: false, itemName: item.name };
+    const subtotal = (row.qty || 0) * ing.avgCost;
+    baseRecipe.push({
+      ingredientId: row.ingredientId,
+      ingredientName: ing.name,
+      qty: row.qty || 0,
+      costAtTransaction: ing.avgCost,
+      subtotal,
+    });
+  }
+  const baseHppPerUnit = baseRecipe.reduce((s, r) => s + r.subtotal, 0);
+
+  const modifierDetail = [];
+  for (const selectedOption of item.options) {
+    const group = groups.find(g => g.id === selectedOption.groupId);
+    const option = group && (group.options || []).find(o => o.id === selectedOption.optionId);
+    const optionRecipeRows = (option && option.recipe) || [];
+
+    const recipe = [];
+    for (const row of optionRecipeRows) {
+      const ing = INGREDIENT_MAP[row.ingredientId];
+      if (!ing) return { ok: false, itemName: item.name };
+      const subtotal = (row.qty || 0) * ing.avgCost;
+      recipe.push({
+        ingredientId: row.ingredientId,
+        ingredientName: ing.name,
+        qty: row.qty || 0,
+        costAtTransaction: ing.avgCost,
+        subtotal,
+      });
+    }
+    const hpp = recipe.reduce((s, r) => s + r.subtotal, 0);
+    modifierDetail.push({
+      groupId: selectedOption.groupId,
+      groupName: selectedOption.groupName,
+      optionId: selectedOption.optionId,
+      optionName: selectedOption.name,
+      sellingPrice: selectedOption.price,
+      hpp,
+      recipe,
+    });
+  }
+  const modifierHppPerUnit = modifierDetail.reduce((s, o) => s + o.hpp, 0);
+
+  const totalHppPerUnit = Math.ceil(baseHppPerUnit + modifierHppPerUnit);
+  const itemTotalHpp = totalHppPerUnit * item.qty;
+
+  return {
+    ok: true,
+    snapshot: { baseHppPerUnit, modifierHppPerUnit, totalHppPerUnit, itemTotalHpp, baseRecipe, modifierDetail },
+  };
+}
+
 payConfirmBtn.addEventListener("click", () => {
+  // Historical Financial Integrity - Phase A: resolve hppSnapshot untuk
+  // SETIAP item tiket dulu, SEBELUM transaction dibuat/di-submit. Kalau
+  // ada satu item aja yang bermasalah, SELURUH checkout dibatalkan (tidak
+  // ada addDoc yang jalan sama sekali) - bukan partial transaction, bukan
+  // silently skip. Cashier pakai tombol hapus-item tiket yang udah ada
+  // buat keluarin item bermasalah, lalu coba checkout lagi.
+  const snapshotResults = ticket.map(item => resolveItemHppSnapshot(item));
+  const blockedResult = snapshotResults.find(r => !r.ok);
+  if (blockedResult) {
+    alert(`Transaksi dibatalkan: "${blockedResult.itemName}" punya data bahan baku yang bermasalah (tidak ditemukan). Hapus item ini dari tiket lalu coba lagi, atau hubungi admin.`);
+    return;
+  }
+
   const total = currentTotal();
   const cashReceived = paymentMethod === "Cash" ? Number(cashInput.value) || 0 : null;
   const change = paymentMethod === "Cash" ? Math.max(cashReceived - total, 0) : null;
@@ -862,12 +959,13 @@ payConfirmBtn.addEventListener("click", () => {
   const now = new Date();
 
   const transaction = {
-    items: ticket.map(item => ({
+    items: ticket.map((item, idx) => ({
       name: item.name,
       catLabel: item.catLabel,
       optLabels: item.options.length ? item.options.map(o => o.name).join(", ") : "Original",
       qty: item.qty,
       lineTotal: lineTotal(item),
+      hppSnapshot: snapshotResults[idx].snapshot,
     })),
     total,
     paymentMethod,
