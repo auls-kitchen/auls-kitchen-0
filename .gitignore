@@ -1,0 +1,9 @@
+node_modules/
+.firebase/
+.env
+.env.*
+*.pem
+*.key
+serviceAccount*.json
+backups/
+outputs/
