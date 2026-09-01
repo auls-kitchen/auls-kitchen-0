@@ -93,7 +93,7 @@
 </div>
 
 <div class="section">
-  <h3>2. Call orderIntent</h3>
+  <h3>2. Idempotency Replay Test — Scope 22A</h3>
   <label>Product ID
     <input id="productId" value="coffee__ori-ala-aul" />
   </label>
@@ -106,15 +106,33 @@
   <label>Notes (optional)
     <input id="notes" value="" />
   </label>
-  <label>Idempotency key (auto-generated, unique per click)
+  <label>Idempotency key (fixed for this test cycle — NOT
+    regenerated automatically after Call #1)
     <input id="idemKey" readonly />
   </label>
-  <button id="btnCall" disabled>Call orderIntent</button>
+  <button id="btnNewKey">Generate New Key (start new test cycle)</button>
+  <br/>
+  <button id="btnCall1" disabled>CALL #1 (NEW)</button>
+  <button id="btnCall2" disabled>CALL #2 (IDEMPOTENCY REPLAY TEST)</button>
 </div>
 
 <div class="section">
-  <h3>3. Raw result / error</h3>
-  <pre id="rawOutput">(nothing yet)</pre>
+  <h3>3. Test State</h3>
+  <pre id="testState">Idempotency key:
+(not yet generated)
+
+Call #1: NOT RUN
+Call #2: NOT RUN</pre>
+</div>
+
+<div class="section">
+  <h3>4. Call #1 raw result (NEW)</h3>
+  <pre id="rawOutput1">(nothing yet)</pre>
+</div>
+
+<div class="section">
+  <h3>5. Call #2 raw result (IDEMPOTENCY REPLAY TEST)</h3>
+  <pre id="rawOutput2">(nothing yet)</pre>
 </div>
 
 <script type="module">
@@ -145,39 +163,70 @@
   const authStatusEl = document.getElementById("authStatus");
   const authStateEl = document.getElementById("authState");
   const btnSignIn = document.getElementById("btnSignIn");
-  const btnCall = document.getElementById("btnCall");
-  const rawOutputEl = document.getElementById("rawOutput");
+  const btnNewKey = document.getElementById("btnNewKey");
+  const btnCall1 = document.getElementById("btnCall1");
+  const btnCall2 = document.getElementById("btnCall2");
+  const testStateEl = document.getElementById("testState");
+  const rawOutput1El = document.getElementById("rawOutput1");
+  const rawOutput2El = document.getElementById("rawOutput2");
   const idemKeyEl = document.getElementById("idemKey");
 
+  let isSignedIn = false;
+  let call1Status = "NOT RUN";
+  let call2Status = "NOT RUN";
+
   function newIdempotencyKey() {
-    // crypto.randomUUID() requires a secure context (https or localhost).
     return (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
   }
-  idemKeyEl.value = newIdempotencyKey();
+
+  function renderTestState() {
+    testStateEl.textContent =
+      "Idempotency key:\n" + (idemKeyEl.value || "(not yet generated)") +
+      "\n\nCall #1: " + call1Status +
+      "\nCall #2: " + call2Status;
+  }
+
+  function updateCallButtons() {
+    btnCall1.disabled = !isSignedIn || call1Status !== "NOT RUN";
+    btnCall2.disabled = !isSignedIn || call1Status === "NOT RUN";
+  }
+
+  function startNewTestCycle() {
+    idemKeyEl.value = newIdempotencyKey();
+    call1Status = "NOT RUN";
+    call2Status = "NOT RUN";
+    rawOutput1El.textContent = "(nothing yet)";
+    rawOutput2El.textContent = "(nothing yet)";
+    renderTestState();
+    updateCallButtons();
+  }
+
+  startNewTestCycle();
 
   onAuthStateChanged(auth, (user) => {
     if (user) {
+      isSignedIn = true;
       authStatusEl.textContent = "signed in (anonymous)";
       authStateEl.textContent = JSON.stringify(
         { uid: user.uid, isAnonymous: user.isAnonymous, providerId: user.providerId },
         null, 2
       );
-      btnCall.disabled = false;
     } else {
+      isSignedIn = false;
       authStatusEl.textContent = "not signed in";
       authStateEl.textContent = "{}";
-      btnCall.disabled = true;
     }
+    updateCallButtons();
   });
 
   btnSignIn.addEventListener("click", async () => {
     btnSignIn.disabled = true;
-    rawOutputEl.textContent = "Signing in...";
     try {
       const result = await signInAnonymously(auth);
-      rawOutputEl.textContent = "Sign-in success. UID: " + result.user.uid;
+      authStatusEl.textContent = "signed in (anonymous). UID: " + result.user.uid;
     } catch (err) {
-      rawOutputEl.textContent = "Sign-in FAILED:\n" + JSON.stringify(
+      authStatusEl.textContent = "sign-in FAILED";
+      authStateEl.textContent = JSON.stringify(
         { code: err.code, message: err.message }, null, 2
       );
     } finally {
@@ -185,13 +234,12 @@
     }
   });
 
-  btnCall.addEventListener("click", async () => {
-    btnCall.disabled = true;
-    rawOutputEl.textContent = "Calling orderIntent...";
+  btnNewKey.addEventListener("click", () => {
+    startNewTestCycle();
+  });
 
-    // Only locked client-supplied fields are sent. No price, total,
-    // recipe, HPP, or stock values are included from the client.
-    const payload = {
+  function buildPayload() {
+    return {
       idempotencyKey: idemKeyEl.value,
       items: [
         {
@@ -203,21 +251,49 @@
       customerName: document.getElementById("customerName").value || undefined,
       notes: document.getElementById("notes").value || undefined,
     };
+  }
+
+  btnCall1.addEventListener("click", async () => {
+    btnCall1.disabled = true;
+    rawOutput1El.textContent = "Calling orderIntent (Call #1 - NEW)...";
+    const payload = buildPayload();
 
     try {
       const callOrderIntent = httpsCallable(functions, "orderIntent");
       const response = await callOrderIntent(payload);
-      rawOutputEl.textContent = "SUCCESS:\n" + JSON.stringify(response.data, null, 2);
+      rawOutput1El.textContent = "SUCCESS:\n" + JSON.stringify(response.data, null, 2);
+      call1Status = "NEW / SUCCESS";
     } catch (err) {
-      rawOutputEl.textContent = "ERROR:\n" + JSON.stringify(
+      rawOutput1El.textContent = "ERROR:\n" + JSON.stringify(
         { code: err.code, message: err.message, details: err.details },
         null, 2
       );
+      call1Status = "NEW / FAILED";
     } finally {
-      // Fresh idempotency key for the next manual click, so repeat
-      // tests don't collide with a prior attempt.
-      idemKeyEl.value = newIdempotencyKey();
-      btnCall.disabled = false;
+      renderTestState();
+      updateCallButtons();
+    }
+  });
+
+  btnCall2.addEventListener("click", async () => {
+    btnCall2.disabled = true;
+    rawOutput2El.textContent = "Calling orderIntent (Call #2 - IDEMPOTENCY REPLAY TEST)...";
+    const payload = buildPayload();
+
+    try {
+      const callOrderIntent = httpsCallable(functions, "orderIntent");
+      const response = await callOrderIntent(payload);
+      rawOutput2El.textContent = "SUCCESS (REPLAY):\n" + JSON.stringify(response.data, null, 2);
+      call2Status = "REPLAY / SUCCESS";
+    } catch (err) {
+      rawOutput2El.textContent = "ERROR:\n" + JSON.stringify(
+        { code: err.code, message: err.message, details: err.details },
+        null, 2
+      );
+      call2Status = "REPLAY / FAILED";
+    } finally {
+      renderTestState();
+      updateCallButtons();
     }
   });
 </script>
