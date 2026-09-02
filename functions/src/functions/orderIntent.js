@@ -35,6 +35,7 @@ const { requireAuth } = require("../services/authGuard");
 const { validateOrderIntentRequest } = require("../services/orderIntentInputValidation");
 const { buildOrderIntentSafeResponse } = require("../services/orderIntentProjection");
 const { getProductById } = require("../repositories/productsRepo");
+const { getOrderIntent } = require("../repositories/orderIntentsRepo");
 const { resolveOrderLine, aggregateOrder, OrderValidationError } = require("../domain/pricingAndRecipe");
 const { reserveOrderIntent } = require("../domain/reservation");
 
@@ -57,7 +58,24 @@ const orderIntent = onCall(async (request) => {
   });
 
   try {
-    // --- Step 3: resolve product/modifiers, OUTSIDE the transaction. ---
+    // --- Step 3: replay pre-check against the frozen OrderIntent snapshot. ---
+    // This protects historical replay when current product master data
+    // is no longer available. The transaction-level idempotency guard
+    // remains authoritative for race/concurrency safety.
+    const existingOrderIntent = await getOrderIntent(idempotencyKey);
+
+    if (existingOrderIntent) {
+      if (existingOrderIntent.ownerUid !== ownerUid) {
+        throw new OrderValidationError(
+          "IDEMPOTENCY_KEY_CONFLICT",
+          "This request could not be processed. Please try again with a new order."
+        );
+      }
+
+      return buildOrderIntentSafeResponse(existingOrderIntent);
+    }
+
+    // --- Step 4: resolve product/modifiers, OUTSIDE the transaction. ---
     // These are plain master-data reads (product currently exists and
     // what it currently costs) — the reservation decision itself
     // happens later, inside the transaction, where stock is actually
