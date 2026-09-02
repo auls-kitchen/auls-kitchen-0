@@ -47,6 +47,12 @@ function orderIntentRef(idempotencyKey) {
  *
  * Returns { id, ...data } | null.
  */
+async function getOrderIntent(idempotencyKey) {
+  const ref = orderIntentRef(idempotencyKey);
+  const snap = await ref.get();
+  return snap.exists ? { id: snap.id, ...snap.data() } : null;
+}
+
 async function getOrderIntentInTransaction(transaction, idempotencyKey) {
   const ref = orderIntentRef(idempotencyKey);
   const snap = await transaction.get(ref);
@@ -69,6 +75,7 @@ function createOrderIntentInTransaction(transaction, idempotencyKey, data) {
 
 module.exports = {
   orderIntentRef,
+  getOrderIntent,
   getOrderIntentInTransaction,
   createOrderIntentInTransaction,
 };
