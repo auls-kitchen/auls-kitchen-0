@@ -337,6 +337,9 @@ import {
   getFirestore, doc as firestoreDoc, onSnapshot, setDoc,
   collection, addDoc, getDocs, updateDoc, increment, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  getAuth, signInAnonymously, onAuthStateChanged
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
@@ -348,6 +351,24 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
+
+// ===== Scope 23D-1: Anonymous Auth bridge =====
+// Prepares an auth-readiness signal for a future trusted-backend call
+// (Scope 23D-2). This does NOT change the current checkout flow — nothing
+// below reads `auth`, `authReady`, or `getCurrentAuthUid()` yet.
+const auth = getAuth(firebaseApp);
+let currentAuthUid = null;
+let resolveAuthReady;
+const authReady = new Promise(resolve => { resolveAuthReady = resolve; });
+function getCurrentAuthUid() { return currentAuthUid; }
+onAuthStateChanged(auth, user => {
+  if (user) {
+    currentAuthUid = user.uid;
+    resolveAuthReady(user.uid);
+  } else {
+    signInAnonymously(auth).catch(err => console.error("Gagal sign-in anonim:", err));
+  }
+});
 
 // ===== PRODUK: sumber data sekarang Firestore (koleksi "products"), sama kayak menu konsumen =====
 const CATEGORY_COLOR = {
@@ -367,6 +388,12 @@ const MODIFIER_MAP = {};
 // termasuk stock (stock murni concern inventory/availability, bukan HPP).
 // key: ingredientId -> { name, avgCost }
 const INGREDIENT_MAP = {};
+// Scope 23D-1: authoritative Firestore product document ID lookup.
+// key: "catKey|Nama Produk" -> docSnap.id (the REAL Firestore doc ID,
+// never derived/manufactured from name or category — those are only
+// used here as a client-side lookup key, same pattern as RECIPE_MAP/
+// MODIFIER_MAP above).
+const PRODUCT_ID_MAP = {};
 
 async function loadMenuFromFirestore() {
   // Step 3 — Category Master visual metadata: baca "categories" sekali di awal
@@ -408,6 +435,7 @@ async function loadMenuFromFirestore() {
     byCategory[d.category].items.push({ name: d.name, price: d.price, order: d.itemOrder || 99 });
     RECIPE_MAP[`${d.category}|${d.name}`] = d.recipe || [];
     MODIFIER_MAP[`${d.category}|${d.name}`] = d.modifierGroups || [];
+    PRODUCT_ID_MAP[`${d.category}|${d.name}`] = docSnap.id;
   });
   MENU = Object.values(byCategory).sort((a, b) => a.catOrder - b.catOrder);
   MENU.forEach(section => {
@@ -418,7 +446,7 @@ async function loadMenuFromFirestore() {
 
 const fmt = n => "Rp " + n.toLocaleString("id-ID");
 const categoryScroll = document.getElementById("categoryScroll");
-let ticket = []; // {key, name, catLabel, basePrice, options:[{id,label,price}], qty}
+let ticket = []; // {key, name, catLabel, basePrice, productId, options:[{id,label,price}], qty}
 
 // ---------- build category / item accordion ----------
 function buildCategoryUI() {
@@ -438,8 +466,9 @@ function buildCategoryUI() {
       <div class="cat-items">
         ${section.items.map(([name, price], idx) => {
           const groups = MODIFIER_MAP[`${section.key}|${name}`] || [];
+          const productId = PRODUCT_ID_MAP[`${section.key}|${name}`] || "";
           return `
-          <div class="item-block" data-item="${name}" data-price="${price}" data-cat="${section.key}" data-catlabel="${section.cat}">
+          <div class="item-block" data-item="${name}" data-price="${price}" data-cat="${section.key}" data-catlabel="${section.cat}" data-product-id="${productId}">
             <button class="item-row">
               <span class="item-name">${name}<span class="sold-out-tag">Habis</span></span>
               <span class="item-price mono">${fmt(price)}</span>
@@ -581,6 +610,7 @@ categoryScroll.addEventListener("click", e => {
     const catLabel = itemBlock.dataset.catlabel;
     const name = itemBlock.dataset.item;
     const basePrice = Number(itemBlock.dataset.price);
+    const productId = itemBlock.dataset.productId || "";
     const qty = parseInt(itemBlock.querySelector(".qty-value").textContent);
 
     // Scope 2A: validasi grup modifier yang wajib (required) SEBELUM masuk
@@ -614,7 +644,7 @@ categoryScroll.addEventListener("click", e => {
 
     if (hasError) return; // ada grup wajib yang belum dipilih — jangan lanjut ke tiket
 
-    addToTicket(catKey, catLabel, name, basePrice, selectedOptions, qty);
+    addToTicket(catKey, catLabel, name, basePrice, productId, selectedOptions, qty);
     // tutup semua accordion (item + kategori), lalu kembalikan posisi scroll ke header kategori itu
     itemBlock.classList.remove("open");
     catBlock.classList.remove("open");
@@ -636,14 +666,14 @@ categoryScroll.addEventListener("change", e => {
   if (errEl) { errEl.style.display = "none"; errEl.textContent = ""; }
 });
 
-function addToTicket(catKey, catLabel, name, basePrice, options, qty) {
+function addToTicket(catKey, catLabel, name, basePrice, productId, options, qty) {
   const optionIds = options.map(o => o.optionId).sort().join(",");
   const key = `${catKey}|${name}|${optionIds}`;
   const existing = ticket.find(t => t.key === key);
   if (existing) {
     existing.qty += qty;
   } else {
-    ticket.push({ key, catKey, catLabel, name, basePrice, options, qty });
+    ticket.push({ key, catKey, catLabel, name, basePrice, productId, options, qty });
   }
   renderTicket();
 }
