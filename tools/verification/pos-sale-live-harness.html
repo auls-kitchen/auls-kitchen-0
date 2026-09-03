@@ -1,0 +1,1186 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>AUL's Kitchen — POS Sale Live Harness</title>
+<style>
+  body {
+    font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+    max-width: 760px;
+    margin: 20px auto;
+    padding: 0 14px;
+    background: #0f1115;
+    color: #e6e6e6;
+  }
+
+  h1 { font-size: 20px; }
+  h2 { font-size: 16px; }
+
+  .warn {
+    background: #3a2a00;
+    border: 1px solid #a86a00;
+    padding: 12px;
+    border-radius: 8px;
+    margin-bottom: 16px;
+    font-size: 13px;
+  }
+
+  .section {
+    border-top: 1px solid #333;
+    margin-top: 20px;
+    padding-top: 16px;
+  }
+
+  button {
+    background: #2563eb;
+    color: #fff;
+    border: none;
+    padding: 10px 14px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 14px;
+    margin: 6px 6px 6px 0;
+  }
+
+  button:disabled {
+    background: #444;
+    cursor: not-allowed;
+  }
+
+  input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 9px;
+    border-radius: 6px;
+    border: 1px solid #444;
+    background: #1a1d24;
+    color: #fff;
+    margin-top: 5px;
+  }
+
+  label {
+    display: block;
+    margin-top: 10px;
+    font-size: 13px;
+    color: #aaa;
+  }
+
+  pre {
+    background: #1a1d24;
+    border: 1px solid #333;
+    padding: 12px;
+    border-radius: 8px;
+    overflow: auto;
+    font-size: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .pass { color: #7ee787; }
+  .fail { color: #ff7b72; }
+  .pending { color: #d2a8ff; }
+</style>
+</head>
+
+<body>
+
+<h1>AUL's Kitchen — POS Sale Live Verification Harness</h1>
+
+<div class="warn">
+  VERIFICATION ONLY.
+  This page is not part of POS, Kiosk, Online Menu, or Customer Display.
+  It does not directly write products, ingredients, or transactions.
+  The only financial write is the deployed trusted <b>posSale</b> callable.
+</div>
+
+<div class="section">
+  <h2>1. Firebase Auth</h2>
+
+  <button id="btnSignIn">Sign in anonymously</button>
+
+  <div>Status: <span id="authStatus">not signed in</span></div>
+
+  <pre id="authState">{}</pre>
+</div>
+
+<div class="section">
+  <h2>2. Test Configuration</h2>
+
+  <label>
+    Product ID
+    <input id="productId" value="coffee__ori-ala-aul" />
+  </label>
+
+  <label>
+    Quantity
+    <input id="quantity" type="number" value="1" min="1" />
+  </label>
+
+  <label>
+    Customer name
+    <input id="customerName" value="POS Harness Test" />
+  </label>
+
+  <label>
+    Idempotency key
+    <input id="idemKey" readonly />
+  </label>
+
+  <button id="btnNewKey">Generate New Test Key</button>
+</div>
+
+<div class="section">
+  <h2>3. Product / Stock Baseline</h2>
+
+  <button id="btnLoadBaseline" disabled>
+    Load Product + Stock BEFORE
+  </button>
+
+  <pre id="baselineOutput">(not loaded)</pre>
+</div>
+
+<div class="section">
+  <h2>4. Call #1 — NEW SALE</h2>
+
+  <button id="btnCall1" disabled>
+    CALL #1 — NEW SALE
+  </button>
+
+  <pre id="call1Output">(not run)</pre>
+</div>
+
+<div class="section">
+  <h2>5. Stock AFTER Call #1</h2>
+
+  <button id="btnCheckAfter1" disabled>
+    Read Stock AFTER #1
+  </button>
+
+  <pre id="after1Output">(not checked)</pre>
+</div>
+
+<div class="section">
+  <h2>6. Call #2 — IDEMPOTENCY REPLAY</h2>
+
+  <button id="btnCall2" disabled>
+    CALL #2 — REPLAY SAME KEY
+  </button>
+
+  <pre id="call2Output">(not run)</pre>
+</div>
+
+<div class="section">
+  <h2>7. Stock AFTER Call #2</h2>
+
+  <button id="btnCheckAfter2" disabled>
+    Read Stock AFTER #2
+  </button>
+
+  <pre id="after2Output">(not checked)</pre>
+</div>
+
+<div class="section">
+  <h2>8. Transaction Record</h2>
+
+  <button id="btnReadTransaction" disabled>
+    Read Transaction
+  </button>
+
+  <pre id="transactionOutput">(not checked)</pre>
+</div>
+
+<div class="section">
+  <h2>9. Verification Result</h2>
+
+  <pre id="finalOutput">WAITING</pre>
+</div>
+
+<script type="module">
+
+import { initializeApp } from
+  "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+
+import {
+  getAuth,
+  signInAnonymously,
+  onAuthStateChanged
+} from
+  "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+
+import {
+  getFunctions,
+  httpsCallable
+} from
+  "https://www.gstatic.com/firebasejs/10.14.1/firebase-functions.js";
+
+import {
+  getFirestore,
+  doc,
+  getDoc
+} from
+  "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+
+/* ================================================================
+   VERIFIED AUL's Kitchen WEB APP CONFIG
+   Source: existing verified OrderIntent harness.
+   ================================================================ */
+
+const firebaseConfig = {
+  apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
+  authDomain: "auls-kitchen.firebaseapp.com",
+  projectId: "auls-kitchen",
+  storageBucket: "auls-kitchen.firebasestorage.app",
+  messagingSenderId: "981577971183",
+  appId: "1:981577971183:web:61148e193857035c94f21a"
+};
+
+const FUNCTIONS_REGION = "us-central1";
+
+
+/* ================================================================
+   FIREBASE INITIALIZATION
+   ================================================================ */
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const functions = getFunctions(app, FUNCTIONS_REGION);
+const db = getFirestore(app);
+
+
+/* ================================================================
+   UI REFERENCES
+   ================================================================ */
+
+const authStatusEl = document.getElementById("authStatus");
+const authStateEl = document.getElementById("authState");
+
+const productIdEl = document.getElementById("productId");
+const quantityEl = document.getElementById("quantity");
+const customerNameEl = document.getElementById("customerName");
+const idemKeyEl = document.getElementById("idemKey");
+
+const btnSignIn = document.getElementById("btnSignIn");
+const btnNewKey = document.getElementById("btnNewKey");
+const btnLoadBaseline = document.getElementById("btnLoadBaseline");
+const btnCall1 = document.getElementById("btnCall1");
+const btnCheckAfter1 = document.getElementById("btnCheckAfter1");
+const btnCall2 = document.getElementById("btnCall2");
+const btnCheckAfter2 = document.getElementById("btnCheckAfter2");
+const btnReadTransaction = document.getElementById("btnReadTransaction");
+
+const baselineOutputEl = document.getElementById("baselineOutput");
+const call1OutputEl = document.getElementById("call1Output");
+const after1OutputEl = document.getElementById("after1Output");
+const call2OutputEl = document.getElementById("call2Output");
+const after2OutputEl = document.getElementById("after2Output");
+const transactionOutputEl = document.getElementById("transactionOutput");
+const finalOutputEl = document.getElementById("finalOutput");
+
+
+/* ================================================================
+   TEST STATE
+   ================================================================ */
+
+let currentUser = null;
+let baseline = null;
+let call1Result = null;
+let call2Result = null;
+let after1 = null;
+let after2 = null;
+let transactionRecord = null;
+
+let call1Success = false;
+let call2Success = false;
+
+
+/* ================================================================
+   HELPERS
+   ================================================================ */
+
+function newIdempotencyKey() {
+  if (crypto.randomUUID) {
+    return crypto.randomUUID();
+  }
+
+  return (
+    Date.now() +
+    "-" +
+    Math.random().toString(36).slice(2)
+  );
+}
+
+function generateNewKey() {
+  idemKeyEl.value = newIdempotencyKey();
+
+  baseline = null;
+  call1Result = null;
+  call2Result = null;
+  after1 = null;
+  after2 = null;
+  transactionRecord = null;
+
+  call1Success = false;
+  call2Success = false;
+
+  baselineOutputEl.textContent = "(not loaded)";
+  call1OutputEl.textContent = "(not run)";
+  after1OutputEl.textContent = "(not checked)";
+  call2OutputEl.textContent = "(not run)";
+  after2OutputEl.textContent = "(not checked)";
+  transactionOutputEl.textContent = "(not checked)";
+  finalOutputEl.textContent = "WAITING";
+
+  updateButtons();
+}
+
+function updateButtons() {
+  const signedIn = !!currentUser;
+  const hasKey = !!idemKeyEl.value;
+  const hasBaseline = !!baseline;
+  const hasAfter1 = !!after1;
+
+  btnLoadBaseline.disabled = !signedIn || !hasKey;
+
+  btnCall1.disabled =
+    !signedIn ||
+    !hasBaseline ||
+    call1Success;
+
+  btnCheckAfter1.disabled =
+    !signedIn ||
+    !call1Success ||
+    !!after1;
+
+  btnCall2.disabled =
+    !signedIn ||
+    !call1Success ||
+    !!call2Result;
+
+  btnCheckAfter2.disabled =
+    !signedIn ||
+    !call2Success ||
+    !!after2;
+
+  btnReadTransaction.disabled =
+    !signedIn ||
+    !call2Success;
+}
+
+function safeError(err) {
+  return {
+    code: err?.code || null,
+    message: err?.message || String(err),
+    details: err?.details || null
+  };
+}
+
+function numberOrNull(value) {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+
+/* ================================================================
+   AUTH STATE
+   ================================================================ */
+
+onAuthStateChanged(auth, (user) => {
+
+  currentUser = user || null;
+
+  if (user) {
+
+    authStatusEl.textContent =
+      "signed in (anonymous)";
+
+    authStateEl.textContent =
+      JSON.stringify(
+        {
+          uid: user.uid,
+          isAnonymous: user.isAnonymous,
+          providerId: user.providerId
+        },
+        null,
+        2
+      );
+
+  } else {
+
+    authStatusEl.textContent =
+      "not signed in";
+
+    authStateEl.textContent = "{}";
+  }
+
+  updateButtons();
+});
+
+
+/* ================================================================
+   SIGN IN
+   ================================================================ */
+
+btnSignIn.addEventListener("click", async () => {
+
+  btnSignIn.disabled = true;
+
+  try {
+
+    const result = await signInAnonymously(auth);
+
+    authStatusEl.textContent =
+      "signed in (anonymous). UID: " +
+      result.user.uid;
+
+  } catch (err) {
+
+    authStatusEl.textContent =
+      "sign-in FAILED";
+
+    authStateEl.textContent =
+      JSON.stringify(
+        safeError(err),
+        null,
+        2
+      );
+
+  } finally {
+
+    btnSignIn.disabled = false;
+    updateButtons();
+  }
+});
+
+
+/* ================================================================
+   NEW TEST KEY
+   ================================================================ */
+
+btnNewKey.addEventListener(
+  "click",
+  generateNewKey
+);
+
+generateNewKey();
+
+
+/* ================================================================
+   LOAD PRODUCT + INGREDIENT STOCK BASELINE
+   ================================================================ */
+
+btnLoadBaseline.addEventListener(
+  "click",
+  async () => {
+
+    btnLoadBaseline.disabled = true;
+
+    try {
+
+      const productId =
+        productIdEl.value.trim();
+
+      const quantity =
+        Number(quantityEl.value);
+
+      if (!productId) {
+        throw new Error("Product ID is required.");
+      }
+
+      if (!Number.isInteger(quantity) || quantity <= 0) {
+        throw new Error(
+          "Quantity must be a positive integer."
+        );
+      }
+
+      const productRef =
+        doc(db, "products", productId);
+
+      const productSnap =
+        await getDoc(productRef);
+
+      if (!productSnap.exists()) {
+        throw new Error(
+          "Product does not exist: " + productId
+        );
+      }
+
+      const product =
+        {
+          id: productSnap.id,
+          ...productSnap.data()
+        };
+
+      const recipe =
+        Array.isArray(product.recipe)
+          ? product.recipe
+          : [];
+
+      const ingredientIds =
+        [
+          ...new Set(
+            recipe
+              .map(row => row?.ingredientId)
+              .filter(Boolean)
+          )
+        ];
+
+      const ingredients = [];
+
+      for (const ingredientId of ingredientIds) {
+
+        const ingredientRef =
+          doc(
+            db,
+            "ingredients",
+            ingredientId
+          );
+
+        const ingredientSnap =
+          await getDoc(ingredientRef);
+
+        if (!ingredientSnap.exists()) {
+          throw new Error(
+            "Recipe ingredient missing: " +
+            ingredientId
+          );
+        }
+
+        const data =
+          ingredientSnap.data();
+
+        ingredients.push({
+          ingredientId,
+          ingredientName:
+            data.name || ingredientId,
+          stockBefore:
+            numberOrNull(data.stock),
+          unit:
+            data.unit || null,
+          recipeQtyPerUnit:
+            numberOrNull(
+              recipe.find(
+                row =>
+                  row?.ingredientId === ingredientId
+              )?.qty
+            ),
+          expectedDecrease:
+            numberOrNull(
+              recipe.find(
+                row =>
+                  row?.ingredientId === ingredientId
+              )?.qty
+            ) * quantity
+        });
+      }
+
+      baseline = {
+        productId,
+        productName:
+          product.name || null,
+        productPrice:
+          numberOrNull(product.price),
+        quantity,
+        recipe,
+        ingredients
+      };
+
+      baselineOutputEl.textContent =
+        JSON.stringify(
+          baseline,
+          null,
+          2
+        );
+
+      updateButtons();
+
+    } catch (err) {
+
+      baselineOutputEl.textContent =
+        "ERROR:\n" +
+        JSON.stringify(
+          safeError(err),
+          null,
+          2
+        );
+
+      baseline = null;
+      updateButtons();
+
+    } finally {
+
+      btnLoadBaseline.disabled =
+        !currentUser ||
+        !idemKeyEl.value;
+    }
+  }
+);
+
+
+/* ================================================================
+   CALL #1 — NEW POS SALE
+   ================================================================ */
+
+btnCall1.addEventListener(
+  "click",
+  async () => {
+
+    btnCall1.disabled = true;
+
+    try {
+
+      const callPosSale =
+        httpsCallable(
+          functions,
+          "posSale"
+        );
+
+      const payload = {
+        idempotencyKey:
+          idemKeyEl.value,
+
+        items: [
+          {
+            productId:
+              productIdEl.value.trim(),
+
+            quantity:
+              Number(quantityEl.value),
+
+            selectedModifiers: []
+          }
+        ],
+
+        paymentMethod: "Cash",
+
+        /*
+         * Ori Ala AUL was previously verified
+         * at 9000. 100000 gives the trusted
+         * backend enough room for this test.
+         */
+        cashReceived: 100000,
+
+        customerName:
+          customerNameEl.value.trim() ||
+          undefined
+      };
+
+      const response =
+        await callPosSale(payload);
+
+      call1Result =
+        response.data;
+
+      call1Success = true;
+
+      call1OutputEl.textContent =
+        "SUCCESS — NEW SALE\n\n" +
+        JSON.stringify(
+          response.data,
+          null,
+          2
+        );
+
+      updateButtons();
+
+    } catch (err) {
+
+      call1OutputEl.textContent =
+        "ERROR — CALL #1\n\n" +
+        JSON.stringify(
+          safeError(err),
+          null,
+          2
+        );
+
+      call1Success = false;
+      updateButtons();
+    }
+  }
+);
+
+
+/* ================================================================
+   READ STOCK AFTER CALL #1
+   ================================================================ */
+
+btnCheckAfter1.addEventListener(
+  "click",
+  async () => {
+
+    btnCheckAfter1.disabled = true;
+
+    try {
+
+      if (!baseline) {
+        throw new Error(
+          "Baseline is required first."
+        );
+      }
+
+      const ingredients = [];
+
+      for (
+        const baselineIngredient
+        of baseline.ingredients
+      ) {
+
+        const ingredientRef =
+          doc(
+            db,
+            "ingredients",
+            baselineIngredient.ingredientId
+          );
+
+        const snap =
+          await getDoc(ingredientRef);
+
+        if (!snap.exists()) {
+          throw new Error(
+            "Ingredient disappeared: " +
+            baselineIngredient.ingredientId
+          );
+        }
+
+        const data =
+          snap.data();
+
+        const stockAfter =
+          numberOrNull(data.stock);
+
+        const stockBefore =
+          baselineIngredient.stockBefore;
+
+        const delta =
+          stockBefore !== null &&
+          stockAfter !== null
+            ? stockBefore - stockAfter
+            : null;
+
+        ingredients.push({
+          ingredientId:
+            baselineIngredient.ingredientId,
+
+          ingredientName:
+            baselineIngredient.ingredientName,
+
+          stockBefore,
+
+          stockAfter,
+
+          observedDecrease: delta,
+
+          expectedDecrease:
+            baselineIngredient.expectedDecrease
+        });
+      }
+
+      after1 = {
+        ingredients
+      };
+
+      after1OutputEl.textContent =
+        JSON.stringify(
+          after1,
+          null,
+          2
+        );
+
+      updateButtons();
+
+    } catch (err) {
+
+      after1OutputEl.textContent =
+        "ERROR:\n" +
+        JSON.stringify(
+          safeError(err),
+          null,
+          2
+        );
+
+      after1 = null;
+      updateButtons();
+    }
+  }
+);
+
+
+/* ================================================================
+   CALL #2 — SAME IDEMPOTENCY KEY
+   ================================================================ */
+
+btnCall2.addEventListener(
+  "click",
+  async () => {
+
+    btnCall2.disabled = true;
+
+    try {
+
+      const callPosSale =
+        httpsCallable(
+          functions,
+          "posSale"
+        );
+
+      const payload = {
+        idempotencyKey:
+          idemKeyEl.value,
+
+        items: [
+          {
+            productId:
+              productIdEl.value.trim(),
+
+            quantity:
+              Number(quantityEl.value),
+
+            selectedModifiers: []
+          }
+        ],
+
+        paymentMethod: "Cash",
+
+        cashReceived: 100000,
+
+        customerName:
+          customerNameEl.value.trim() ||
+          undefined
+      };
+
+      const response =
+        await callPosSale(payload);
+
+      call2Result =
+        response.data;
+
+      call2Success = true;
+
+      call2OutputEl.textContent =
+        "SUCCESS — IDEMPOTENCY REPLAY\n\n" +
+        JSON.stringify(
+          response.data,
+          null,
+          2
+        );
+
+      updateButtons();
+
+    } catch (err) {
+
+      call2OutputEl.textContent =
+        "ERROR — CALL #2\n\n" +
+        JSON.stringify(
+          safeError(err),
+          null,
+          2
+        );
+
+      call2Success = false;
+      updateButtons();
+    }
+  }
+);
+
+
+/* ================================================================
+   READ STOCK AFTER CALL #2
+   ================================================================ */
+
+btnCheckAfter2.addEventListener(
+  "click",
+  async () => {
+
+    btnCheckAfter2.disabled = true;
+
+    try {
+
+      if (!after1) {
+        throw new Error(
+          "Stock AFTER #1 is required first."
+        );
+      }
+
+      const ingredients = [];
+
+      for (
+        const afterOneIngredient
+        of after1.ingredients
+      ) {
+
+        const ingredientRef =
+          doc(
+            db,
+            "ingredients",
+            afterOneIngredient.ingredientId
+          );
+
+        const snap =
+          await getDoc(ingredientRef);
+
+        if (!snap.exists()) {
+          throw new Error(
+            "Ingredient missing after replay: " +
+            afterOneIngredient.ingredientId
+          );
+        }
+
+        const data =
+          snap.data();
+
+        const stockAfterReplay =
+          numberOrNull(data.stock);
+
+        const stockAfterFirst =
+          afterOneIngredient.stockAfter;
+
+        const replayDecrease =
+          stockAfterFirst !== null &&
+          stockAfterReplay !== null
+            ? stockAfterFirst -
+              stockAfterReplay
+            : null;
+
+        ingredients.push({
+          ingredientId:
+            afterOneIngredient.ingredientId,
+
+          ingredientName:
+            afterOneIngredient.ingredientName,
+
+          stockAfterCall1:
+            stockAfterFirst,
+
+          stockAfterCall2:
+            stockAfterReplay,
+
+          replayObservedDecrease:
+            replayDecrease
+        });
+      }
+
+      after2 = {
+        ingredients
+      };
+
+      after2OutputEl.textContent =
+        JSON.stringify(
+          after2,
+          null,
+          2
+        );
+
+      updateButtons();
+
+    } catch (err) {
+
+      after2OutputEl.textContent =
+        "ERROR:\n" +
+        JSON.stringify(
+          safeError(err),
+          null,
+          2
+        );
+
+      after2 = null;
+      updateButtons();
+    }
+  }
+);
+
+
+/* ================================================================
+   READ TRANSACTION DOCUMENT
+   ================================================================ */
+
+btnReadTransaction.addEventListener(
+  "click",
+  async () => {
+
+    btnReadTransaction.disabled = true;
+
+    try {
+
+      const transactionRef =
+        doc(
+          db,
+          "transactions",
+          idemKeyEl.value
+        );
+
+      const snap =
+        await getDoc(transactionRef);
+
+      if (!snap.exists()) {
+        throw new Error(
+          "Transaction document not found."
+        );
+      }
+
+      transactionRecord = {
+        id: snap.id,
+        ...snap.data()
+      };
+
+      transactionOutputEl.textContent =
+        JSON.stringify(
+          transactionRecord,
+          null,
+          2
+        );
+
+      runFinalVerification();
+
+    } catch (err) {
+
+      transactionOutputEl.textContent =
+        "ERROR:\n" +
+        JSON.stringify(
+          safeError(err),
+          null,
+          2
+        );
+    }
+  }
+);
+
+
+/* ================================================================
+   FINAL VERIFICATION
+   ================================================================ */
+
+function runFinalVerification() {
+
+  const results = [];
+
+  results.push({
+    test: "Anonymous Auth",
+    pass: !!currentUser
+  });
+
+  results.push({
+    test: "Call #1 NEW SUCCESS",
+    pass: call1Success
+  });
+
+  results.push({
+    test: "Call #2 REPLAY SUCCESS",
+    pass: call2Success
+  });
+
+  results.push({
+    test: "Transaction exists",
+    pass: !!transactionRecord
+  });
+
+  results.push({
+    test: "Transaction ID = idempotency key",
+    pass:
+      !!transactionRecord &&
+      transactionRecord.id ===
+        idemKeyEl.value
+  });
+
+  results.push({
+    test: "Transaction total exists",
+    pass:
+      !!transactionRecord &&
+      Number.isFinite(
+        Number(transactionRecord.total)
+      )
+  });
+
+  let stockOncePass = true;
+
+  if (!after1 || !after2) {
+    stockOncePass = false;
+  } else {
+
+    for (
+      const row
+      of after1.ingredients
+    ) {
+
+      const expected =
+        Number(row.expectedDecrease);
+
+      const observed =
+        Number(row.observedDecrease);
+
+      if (
+        !Number.isFinite(expected) ||
+        !Number.isFinite(observed) ||
+        observed !== expected
+      ) {
+        stockOncePass = false;
+      }
+    }
+
+    for (
+      const row
+      of after2.ingredients
+    ) {
+
+      const replayDecrease =
+        Number(row.replayObservedDecrease);
+
+      if (
+        !Number.isFinite(replayDecrease) ||
+        replayDecrease !== 0
+      ) {
+        stockOncePass = false;
+      }
+    }
+  }
+
+  results.push({
+    test: "Stock decremented exactly once",
+    pass: stockOncePass
+  });
+
+  const hppSnapshotPass =
+    !!transactionRecord &&
+    Array.isArray(transactionRecord.items) &&
+    transactionRecord.items.length > 0 &&
+    transactionRecord.items.every(
+      item =>
+        item.hppSnapshot &&
+        Number.isFinite(
+          Number(
+            item.hppSnapshot.totalHppPerUnit
+          )
+        ) &&
+        Number.isFinite(
+          Number(
+            item.hppSnapshot.itemTotalHpp
+          )
+        )
+    );
+
+  results.push({
+    test: "HPP snapshot present",
+    pass: hppSnapshotPass
+  });
+
+  const allPass =
+    results.every(
+      result => result.pass
+    );
+
+  finalOutputEl.textContent =
+    (allPass
+      ? "LIVE VERIFICATION: PASS"
+      : "LIVE VERIFICATION: NOT PASS") +
+    "\n\n" +
+    JSON.stringify(
+      results,
+      null,
+      2
+    );
+}
+
+</script>
+
+</body>
+</html>
