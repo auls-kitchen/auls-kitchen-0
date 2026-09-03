@@ -16,6 +16,7 @@ const { logger } = require("firebase-functions/v2");
 const {
   getFirestore,
   FieldValue,
+  Timestamp,
 } = require("firebase-admin/firestore");
 
 const { requireAuth } = require("../services/authGuard");
@@ -54,7 +55,24 @@ function buildNoStruk(date) {
   );
 }
 
-function validatePayment(paymentMethod, cashReceived, authoritativeTotal) {
+function toClientTransaction(transaction) {
+  if (!transaction) return transaction;
+
+  return {
+    ...transaction,
+    createdAt:
+      transaction.createdAt &&
+      typeof transaction.createdAt.toDate === "function"
+        ? transaction.createdAt.toDate().toISOString()
+        : transaction.createdAt,
+  };
+}
+
+function validatePayment(
+  paymentMethod,
+  cashReceived,
+  authoritativeTotal
+) {
   if (paymentMethod !== "Cash") {
     throw new OrderValidationError(
       "PAYMENT_METHOD_NOT_SUPPORTED",
@@ -106,7 +124,6 @@ async function commitPosSale({
   cashReceived,
   change,
   customerName,
-  kasir,
 }) {
   return db.runTransaction(async transaction => {
     // FIRST READ: authoritative idempotency guard.
@@ -125,24 +142,28 @@ async function commitPosSale({
 
       return {
         alreadyExisted: true,
-        transaction: existing,
+        transaction: toClientTransaction(existing),
       };
     }
 
-    const { reservationRequirement } = aggregateOrder(resolvedLines);
+    const { reservationRequirement } =
+      aggregateOrder(resolvedLines);
 
     const ingredientIds = reservationRequirement.map(
       requirement => requirement.ingredientId
     );
 
-    const ingredientsById = await getIngredientsByIdsInTransaction(
-      transaction,
-      ingredientIds
-    );
+    const ingredientsById =
+      await getIngredientsByIdsInTransaction(
+        transaction,
+        ingredientIds
+      );
 
     // Validate every required ingredient before any stock write.
     for (const requirement of reservationRequirement) {
-      const ingredient = ingredientsById.get(requirement.ingredientId);
+      const ingredient = ingredientsById.get(
+        requirement.ingredientId
+      );
 
       if (!ingredient) {
         throw new OrderValidationError(
@@ -153,7 +174,10 @@ async function commitPosSale({
 
       const stock = Number(ingredient.stock);
 
-      if (!Number.isFinite(stock) || stock < requirement.qty) {
+      if (
+        !Number.isFinite(stock) ||
+        stock < requirement.qty
+      ) {
         throw new OrderValidationError(
           "INSUFFICIENT_STOCK",
           "Insufficient stock."
@@ -174,20 +198,24 @@ async function commitPosSale({
     const transactionData = {
       idempotencyKey,
       ownerUid,
-      items: buildTransactionItems(resolvedLines, hppSnapshots),
+      items: buildTransactionItems(
+        resolvedLines,
+        hppSnapshots
+      ),
       total: authoritativeTotal,
       paymentMethod,
       cashReceived,
       change,
       customerName,
       noStruk: buildNoStruk(now),
-      kasir: typeof kasir === "string" ? kasir.trim() : "",
+      kasir: "",
       source: "POS",
       status: "COMPLETED",
-      createdAt: FieldValue.serverTimestamp(),
+      createdAt: Timestamp.fromDate(now),
     };
 
-    // All stock writes happen in the same transaction as the sale.
+    // All stock writes happen in the same transaction
+    // as the sale.
     for (const requirement of reservationRequirement) {
       const ingredientRef = db
         .collection("ingredients")
@@ -206,7 +234,7 @@ async function commitPosSale({
 
     return {
       alreadyExisted: false,
-      transaction: transactionData,
+      transaction: toClientTransaction(transactionData),
     };
   });
 }
@@ -237,7 +265,6 @@ const posSale = onCall(async request => {
     paymentMethod,
     cashReceived,
     customerName,
-    kasir,
   } = validated;
 
   logger.info("posSale: invoked", {
@@ -251,7 +278,9 @@ const posSale = onCall(async request => {
 
   try {
     // Replay pre-check.
-    const existing = await getTransaction(idempotencyKey);
+    const existing = await getTransaction(
+      idempotencyKey
+    );
 
     if (existing) {
       if (existing.ownerUid !== ownerUid) {
@@ -261,13 +290,15 @@ const posSale = onCall(async request => {
         );
       }
 
-      return existing;
+      return toClientTransaction(existing);
     }
 
     const resolvedLines = [];
 
     for (const item of items) {
-      const product = await getProductById(item.productId);
+      const product = await getProductById(
+        item.productId
+      );
 
       if (!product) {
         throw new OrderValidationError(
@@ -290,7 +321,8 @@ const posSale = onCall(async request => {
       });
     }
 
-    const { authoritativeTotal } = aggregateOrder(resolvedLines);
+    const { authoritativeTotal } =
+      aggregateOrder(resolvedLines);
 
     const payment = validatePayment(
       paymentMethod,
@@ -307,7 +339,6 @@ const posSale = onCall(async request => {
       cashReceived: payment.cashReceived,
       change: payment.change,
       customerName,
-      kasir,
     });
 
     logger.info("posSale: success", {
@@ -357,7 +388,8 @@ const posSale = onCall(async request => {
       invokedAt,
       idempotencyKey,
       ownerUid,
-      errorMessage: err?.message || "unknown error",
+      errorMessage:
+        err?.message || "unknown error",
     });
 
     throw new HttpsError(
