@@ -207,6 +207,9 @@
   .pay-method-btn.selected{ border-color:var(--yellow); background:rgba(232,163,61,0.12); color:var(--yellow); font-weight:600; }
   .pay-method-btn.pay-method-name{ flex:0.8; }
   .pay-method-btn.pay-method-name.selected{ border-color:var(--green); background:var(--green-dim); color:var(--cream); }
+  .pay-method-btn.unavailable{ opacity:0.4; cursor:not-allowed; }
+  .ticket-mutation-locked #categoryScroll,
+  .ticket-mutation-locked #ticketList{ opacity:0.5; pointer-events:none; }
   .name-field{ display:none; margin-bottom:14px; }
   .name-field.show{ display:block; }
   .name-field label{ font-size:11.5px; color:var(--muted); text-transform:uppercase; letter-spacing:0.08em; font-family:'JetBrains Mono', monospace; }
@@ -282,7 +285,7 @@
       <div class="pay-methods">
         <div class="pay-method-btn" data-method="Cash">Cash</div>
         <div class="pay-method-btn pay-method-name" id="namaToggleBtn">Nama</div>
-        <div class="pay-method-btn" data-method="QRIS">QRIS</div>
+        <div class="pay-method-btn unavailable" data-method="QRIS">QRIS</div>
       </div>
       <div class="name-field" id="nameField">
         <label>Nama Konsumen <span class="opt-tag">(opsional)</span></label>
@@ -340,6 +343,9 @@ import {
 import {
   getAuth, signInAnonymously, onAuthStateChanged
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  getFunctions, httpsCallable
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
@@ -369,6 +375,15 @@ onAuthStateChanged(auth, user => {
     signInAnonymously(auth).catch(err => console.error("Gagal sign-in anonim:", err));
   }
 });
+
+// ===== Scope 23D-2: trusted backend checkout boundary =====
+// Region "us-central1" matches the deployed posSale function per the
+// Scope 23C checkpoint, and matches the Cloud Functions v2 default region
+// used implicitly by every onCall() definition in functions/src (no
+// region override exists anywhere in that source — verified by
+// inspection, not a live Console query).
+const functionsClient = getFunctions(firebaseApp, "us-central1");
+const posSaleCallable = httpsCallable(functionsClient, "posSale");
 
 // ===== PRODUK: sumber data sekarang Firestore (koleksi "products"), sama kayak menu konsumen =====
 const CATEGORY_COLOR = {
@@ -604,6 +619,9 @@ categoryScroll.addEventListener("click", e => {
 
   const addBtn = e.target.closest(".add-ticket-btn");
   if (addBtn) {
+    // Scope 23D-2: ticket contents must not change while a checkout is
+    // in flight or its outcome is ambiguous (same idempotency key).
+    if (ticketLocked) return;
     const itemBlock = addBtn.closest(".item-block");
     const catBlock = itemBlock.closest(".cat-block");
     const catKey = itemBlock.dataset.cat;
@@ -749,6 +767,9 @@ function pushLiveTicket() {
 document.getElementById("ticketList").addEventListener("click", e => {
   const itemEl = e.target.closest(".ticket-item");
   if (!itemEl) return;
+  // Scope 23D-2: same lock as add-ticket-btn — no item edits while a
+  // checkout is in flight or ambiguous.
+  if (ticketLocked) return;
   const idx = Number(itemEl.dataset.idx);
   const action = e.target.closest("button")?.dataset.action;
   if (action === "remove") {
@@ -765,8 +786,17 @@ document.getElementById("ticketList").addEventListener("click", e => {
 });
 
 document.getElementById("ticketClearBtn").addEventListener("click", () => {
-  if (ticket.length === 0) return;
+  // Scope 23D-2: KOSONGKAN is the ONE deliberate abandon action, exempt
+  // from ticketLocked so it stays available even during an ambiguous
+  // checkout outcome. It always clears ticket + idempotency key +
+  // ambiguous flag TOGETHER — never just one of them — so a stale key
+  // can never survive to be paired with a different/edited ticket.
+  if (checkoutInFlight) return; // never during an active transport call
+  if (ticket.length === 0 && !checkoutAmbiguous) return;
   ticket = [];
+  currentIdempotencyKey = null;
+  checkoutAmbiguous = false;
+  setTicketLocked(false);
   renderTicket();
 });
 
@@ -812,7 +842,12 @@ document.getElementById("payCancelBtn").addEventListener("click", () => {
   payModalOverlay.classList.remove("show");
 });
 document.querySelectorAll(".pay-method-btn[data-method]").forEach(btn => {
-  btn.addEventListener("click", () => selectPaymentMethod(btn.dataset.method));
+  btn.addEventListener("click", () => {
+    // Scope 23D-2: QRIS stays visible but inert — posSale only supports
+    // Cash right now. This is a UI guard, not a QRIS implementation.
+    if (btn.classList.contains("unavailable")) return;
+    selectPaymentMethod(btn.dataset.method);
+  });
 });
 namaToggleBtn.addEventListener("click", () => {
   const isOpen = nameField.classList.toggle("show");
@@ -847,6 +882,34 @@ numKeypad.addEventListener("click", e => {
 let lastTransaction = null;
 
 const KASIR_NAME = "Yan Santo"; // GANTI kalau nanti ada nama kasir lain / sistem login staff
+// KASIR_NAME is DISPLAY-ONLY (Scope 23D-2): used solely to fill the
+// printed "Kasir" line, since posSale's trusted contract has no kasir
+// input and always returns kasir:"". Never sent to posSale, never used
+// for authorization — the Firebase Auth UID remains the sole trusted
+// actor identity.
+
+// ===== Scope 23D-2: checkout lifecycle state =====
+// One idempotency key per sale ATTEMPT (not per click) — reused across
+// retries, minted only once auth is confirmed ready (see payConfirmBtn
+// handler below), and cleared only on confirmed success or an explicit
+// KOSONGKAN abandon.
+let currentIdempotencyKey = null;
+// true ONLY while the posSale transport call is actually in flight.
+// Released exclusively in a `finally` block — never left stuck.
+let checkoutInFlight = false;
+// true when the PREVIOUS attempt's outcome is unknown (network/timeout
+// after the request was sent). While true, a retry MUST reuse the same
+// currentIdempotencyKey; a new key must never be minted.
+let checkoutAmbiguous = false;
+// true whenever ticket contents must not change: during an in-flight
+// request OR while ambiguous. Enforced by guards on add-ticket-btn and
+// the ticket item remove/±qty handlers. KOSONGKAN is deliberately exempt
+// (see its handler) so it can serve as the one explicit abandon path.
+let ticketLocked = false;
+function setTicketLocked(locked) {
+  ticketLocked = locked;
+  document.body.classList.toggle("ticket-mutation-locked", locked);
+}
 
 function buildNoStruk(date) {
   const p = n => String(n).padStart(2, "0");
@@ -968,66 +1031,179 @@ function resolveItemHppSnapshot(item) {
   };
 }
 
-payConfirmBtn.addEventListener("click", () => {
-  // Historical Financial Integrity - Phase A: resolve hppSnapshot untuk
-  // SETIAP item tiket dulu, SEBELUM transaction dibuat/di-submit. Kalau
-  // ada satu item aja yang bermasalah, SELURUH checkout dibatalkan (tidak
-  // ada addDoc yang jalan sama sekali) - bukan partial transaction, bukan
-  // silently skip. Cashier pakai tombol hapus-item tiket yang udah ada
-  // buat keluarin item bermasalah, lalu coba checkout lagi.
-  const snapshotResults = ticket.map(item => resolveItemHppSnapshot(item));
-  const blockedResult = snapshotResults.find(r => !r.ok);
-  if (blockedResult) {
-    alert(`Transaksi dibatalkan: "${blockedResult.itemName}" punya data bahan baku yang bermasalah (tidak ditemukan). Hapus item ini dari tiket lalu coba lagi, atau hubungi admin.`);
-    return;
-  }
+// =========================================================
+// Scope 23D-2: trusted checkout — request/response helpers
+// =========================================================
 
-  const total = currentTotal();
-  const cashReceived = paymentMethod === "Cash" ? Number(cashInput.value) || 0 : null;
-  const change = paymentMethod === "Cash" ? Math.max(cashReceived - total, 0) : null;
-  const customerName = customerNameInput.value.trim();
-  const now = new Date();
-
-  const transaction = {
-    items: ticket.map((item, idx) => ({
-      name: item.name,
-      catLabel: item.catLabel,
-      optLabels: item.options.length ? item.options.map(o => o.name).join(", ") : "Original",
-      qty: item.qty,
-      lineTotal: lineTotal(item),
-      hppSnapshot: snapshotResults[idx].snapshot,
+// Maps the current ticket into posSale's authoritative request contract.
+// Only groupId/optionId are sent for modifiers — price/name are resolved
+// server-side from product.modifierGroups[], never trusted from the
+// client (unchanged from the locked pricingAndRecipe.js contract).
+function buildPosSaleRequest() {
+  return {
+    idempotencyKey: currentIdempotencyKey,
+    items: ticket.map(item => ({
+      productId: item.productId,
+      quantity: item.qty,
+      selectedModifiers: item.options.map(o => ({
+        groupId: o.groupId,
+        optionId: o.optionId,
+      })),
     })),
-    total,
     paymentMethod,
-    cashReceived,
-    change,
-    customerName,
-    noStruk: buildNoStruk(now),
-    kasir: KASIR_NAME,
-    source: "POS",
-    status: "COMPLETED",
-    createdAt: serverTimestamp(),
+    cashReceived: paymentMethod === "Cash" ? (Number(cashInput.value) || 0) : null,
+    customerName: customerNameInput.value.trim(),
   };
-  lastTransaction = { ...transaction, createdAt: now };
+}
 
-  addDoc(collection(db, "transactions"), transaction).catch(err => {
-    console.error("Gagal simpan transaksi:", err);
-  });
+// Classifies a thrown posSale callable error into a handling bucket.
+// "ambiguous" and "unknown" are both treated as ambiguous by the caller —
+// an unrecognized error shape must never be assumed safe.
+function classifyPosSaleError(err) {
+  if (err && err.message === "AUTH_TIMEOUT") return "unauthenticated";
+  const domainCode = err && err.details && err.details.code;
+  if (domainCode === "IDEMPOTENCY_KEY_CONFLICT") return "conflict";
+  if (domainCode) return domainCode; // INSUFFICIENT_CASH, INSUFFICIENT_STOCK, etc.
+  const fbCode = err && err.code;
+  if (fbCode === "functions/unauthenticated") return "unauthenticated";
+  if (
+    fbCode === "functions/internal" ||
+    fbCode === "functions/unavailable" ||
+    fbCode === "functions/deadline-exceeded"
+  ) {
+    return "ambiguous";
+  }
+  return "unknown";
+}
 
-  deductStockForTicket(ticket);
+function mapPosSaleErrorMessage(cls) {
+  switch (cls) {
+    case "INSUFFICIENT_CASH":
+      return "Uang diterima tidak cukup.";
+    case "INSUFFICIENT_STOCK":
+      return "Stok bahan baku tidak cukup untuk menyelesaikan pesanan ini.";
+    case "PRODUCT_UNAVAILABLE":
+      return "Salah satu produk di tiket sudah tidak tersedia. Periksa kembali tiket.";
+    case "INGREDIENT_UNAVAILABLE":
+    case "INGREDIENT_COST_INVALID":
+    case "RECIPE_INVALID":
+      return "Data bahan baku bermasalah. Hapus item terkait dari tiket lalu coba lagi, atau hubungi admin.";
+    case "PAYMENT_METHOD_NOT_SUPPORTED":
+      return "Metode pembayaran ini belum didukung sistem transaksi baru. Gunakan Cash.";
+    case "unauthenticated":
+      return "Sesi tidak valid atau belum siap. Coba lagi dalam beberapa detik.";
+    default:
+      return "Transaksi gagal diproses. Coba lagi.";
+  }
+}
 
-  // beri tahu Customer Display supaya nampilin pop-up ucapan terima kasih
-  setDoc(firestoreDoc(db, "status", "txPopup"), {
-    paymentMethod,
-    cashReceived,
-    change,
-    total,
-    ts: Date.now(),
-  }).catch(err => console.error("Gagal kirim pop-up ke customer display:", err));
+// Adapts the authoritative posSale response into the shape the existing
+// receipt/kitchen print builders already expect. AUTHORITATIVE fields
+// (total, change, items[].name/qty/lineTotal, createdAt) are taken
+// verbatim from the backend. `kasir` is the one DISPLAY-ONLY override —
+// see KASIR_NAME above. `catLabel` is intentionally omitted: neither
+// buildReceiptBytes() nor buildKitchenReceiptBytes() ever reads it, in
+// the legacy shape or this one.
+function adaptPosSaleTransaction(tx) {
+  return {
+    noStruk: tx.noStruk,
+    kasir: KASIR_NAME,
+    customerName: tx.customerName,
+    paymentMethod: tx.paymentMethod,
+    cashReceived: tx.cashReceived,
+    change: tx.change,
+    total: tx.total,
+    createdAt: new Date(tx.createdAt),
+    items: tx.items.map(item => ({
+      name: item.name,
+      qty: item.qty,
+      lineTotal: item.lineTotal,
+      optLabels: item.selectedModifiers.length
+        ? item.selectedModifiers.map(m => m.optionName).join(", ")
+        : "Original",
+    })),
+  };
+}
 
-  payModalOverlay.classList.remove("show");
-  document.getElementById("successSub").textContent = `Total ${fmt(total)} — ${paymentMethod}`;
-  document.getElementById("successOverlay").classList.add("show");
+payConfirmBtn.addEventListener("click", async () => {
+  if (checkoutInFlight) return; // hard double-submit guard
+  if (ticket.length === 0 && !checkoutAmbiguous) return;
+
+  checkoutInFlight = true;
+  setTicketLocked(true); // lock immediately — even before ambiguity is known
+  payConfirmBtn.disabled = true;
+
+  try {
+    // Required order (Scope 23D-2 final gate correction): confirm auth
+    // readiness BEFORE minting/reusing the idempotency key. An
+    // AUTH_TIMEOUT happens before any backend sale attempt, so it must
+    // never create an orphaned key. The 23D-1 auth bridge itself
+    // (auth/authReady/onAuthStateChanged/signInAnonymously) is untouched.
+    const authTimeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("AUTH_TIMEOUT")), 8000));
+    await Promise.race([authReady, authTimeout]);
+
+    // Auth confirmed ready — only now create the key if one doesn't
+    // already exist for this sale attempt (fresh attempt or ambiguous
+    // retry both reuse this same guard).
+    if (!currentIdempotencyKey) currentIdempotencyKey = crypto.randomUUID();
+
+    const response = await posSaleCallable(buildPosSaleRequest());
+    const tx = response.data;
+
+    // ---- SUCCESS: this is the sole point where the sale is committed ----
+    lastTransaction = adaptPosSaleTransaction(tx);
+
+    setDoc(firestoreDoc(db, "status", "txPopup"), {
+      paymentMethod: tx.paymentMethod,
+      cashReceived: tx.cashReceived,
+      change: tx.change,
+      total: tx.total,
+      ts: Date.now(),
+    }).catch(err => console.error("Gagal kirim pop-up ke customer display:", err));
+
+    payModalOverlay.classList.remove("show");
+    document.getElementById("successSub").textContent = `Total ${fmt(tx.total)} — ${tx.paymentMethod}`;
+    document.getElementById("successOverlay").classList.add("show");
+
+    checkoutAmbiguous = false;
+    currentIdempotencyKey = null;
+    setTicketLocked(false);
+
+  } catch (err) {
+    const cls = classifyPosSaleError(err);
+
+    if (cls === "ambiguous" || cls === "unknown") {
+      // Outcome unknown — the request may have already committed
+      // server-side. Preserve everything; only a retry with the SAME
+      // key (or the explicit KOSONGKAN abandon) may resolve this.
+      checkoutAmbiguous = true;
+      alert("Koneksi terputus saat memproses transaksi. JANGAN mulai transaksi baru — tekan Selesaikan sekali lagi untuk melanjutkan (aman, tidak akan dobel).");
+    } else if (cls === "conflict") {
+      checkoutAmbiguous = false;
+      currentIdempotencyKey = null;
+      setTicketLocked(false);
+      alert("Sesi berubah, transaksi tidak bisa dilanjutkan dengan permintaan yang sama. Coba lagi.");
+    } else {
+      // Known, definite rejection — safe to correct and retry with the
+      // same key (or a fresh one; the key was never consumed server-side).
+      checkoutAmbiguous = false;
+      setTicketLocked(false);
+      alert(mapPosSaleErrorMessage(cls));
+    }
+  } finally {
+    // Releases ONLY the transport lock. checkoutAmbiguous,
+    // currentIdempotencyKey, and ticketLocked are set explicitly above,
+    // per branch — this block must never touch them. Button re-enable
+    // still respects the existing cash-sufficiency rule (updateChange())
+    // rather than force-enabling regardless of cash input state.
+    checkoutInFlight = false;
+    if (paymentMethod === "Cash") {
+      updateChange();
+    } else {
+      payConfirmBtn.disabled = false;
+    }
+  }
 });
 
 // =========================================================
