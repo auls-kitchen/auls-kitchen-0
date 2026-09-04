@@ -286,9 +286,51 @@
   }
   .modifier-option-recipe-rows{ margin:6px 0 6px 0; padding-left:8px; border-left:2px solid var(--line); display:none; }
   .modifier-option-recipe-rows.show{ display:block; }
+
+  /* ---------- AUTH GATE ---------- */
+  .auth-screen{ flex:1; display:flex; align-items:center; justify-content:center; padding:20px; }
+  .auth-screen.hidden{ display:none; }
+  .login-subtitle{ color:var(--muted); font-size:11px; font-family:'JetBrains Mono', monospace; text-align:center; margin:-10px 0 16px; text-transform:uppercase; letter-spacing:0.08em; }
+  .login-error{ color:#E8544A; font-size:12.5px; margin:-4px 0 14px; text-align:center; display:none; }
+  .login-error.show{ display:block; }
+  .login-submit-btn{ width:100%; }
+  .login-submit-btn:disabled{ opacity:0.5; cursor:not-allowed; }
+  .logout-btn{
+    margin-left:auto; background:none; border:1px solid var(--line); color:var(--muted);
+    font-size:11px; padding:7px 14px; border-radius:16px; cursor:pointer; font-family:'JetBrains Mono', monospace;
+    flex-shrink:0;
+  }
+  #adminAppShell{ display:flex; flex-direction:column; flex:1; min-height:0; }
+  #adminAppShell.hidden{ display:none; }
 </style>
 </head>
 <body>
+
+<!-- AUTH_CHECKING: shown by default until Firebase Auth state resolves -->
+<div class="auth-screen" id="authCheckingScreen">
+  <div class="loading-msg">Memuat autentikasi...</div>
+</div>
+
+<!-- LOGIN_REQUIRED: shown when no authenticated Firebase user exists -->
+<div class="auth-screen hidden" id="loginScreen">
+  <div class="expense-modal">
+    <div class="expense-modal-title display">AUL's Kitchen</div>
+    <div class="login-subtitle">ADMIN LOGIN</div>
+    <div class="field-group">
+      <label>Email</label>
+      <input type="email" class="field-input" id="loginEmail" autocomplete="username">
+    </div>
+    <div class="field-group">
+      <label>Password</label>
+      <input type="password" class="field-input" id="loginPassword" autocomplete="current-password">
+    </div>
+    <div class="login-error" id="loginError"></div>
+    <button class="modal-confirm login-submit-btn" id="loginSubmitBtn" type="button">Masuk</button>
+  </div>
+</div>
+
+<!-- AUTHENTICATED: existing AUL-ADM UI, unchanged, gated behind login -->
+<div id="adminAppShell" class="hidden">
 
 <header>
   <button class="back-btn" id="backBtn" type="button">
@@ -298,6 +340,7 @@
     <div class="title display">AUL's Kitchen</div>
     <div class="subtitle">ADMIN</div>
   </div>
+  <button class="logout-btn" id="logoutBtn" type="button">Keluar</button>
 </header>
 
 <nav class="tabs">
@@ -319,6 +362,8 @@
     <div class="loading-msg">Memuat data...</div>
   </div>
 </main>
+
+</div>
 
 <!-- MODAL TAMBAH PENGELUARAN -->
 <div class="modal-overlay" id="expenseModalOverlay">
@@ -556,6 +601,9 @@ import {
   getFirestore, collection, onSnapshot, addDoc, deleteDoc, doc as firestoreDoc,
   updateDoc, getDocs, getDoc, setDoc, serverTimestamp
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import {
+  getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
@@ -567,6 +615,130 @@ const firebaseConfig = {
 };
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
+const auth = getAuth(firebaseApp);
+
+// =========================================================
+// AUTH GATE — AUL-ADM login (Email/Password, single owner-admin)
+//
+// Three conceptual states:
+//   AUTH_CHECKING  — Firebase Auth state is being resolved (default,
+//                    shown the instant the page loads, before onAuthStateChanged
+//                    has fired even once).
+//   LOGIN_REQUIRED — no authenticated Firebase user exists. Login screen is
+//                    shown; the operational admin UI is never rendered and
+//                    initAdminApp() (all existing Firestore reads/writes,
+//                    listeners, and render logic) is never called.
+//   AUTHENTICATED  — a real Firebase user is confirmed. Admin UI is shown
+//                    and initAdminApp() runs exactly once.
+//
+// This is not just a CSS toggle: initAdminApp() — which registers every
+// existing onSnapshot listener and every Firestore-writing event handler —
+// is itself defined as a function and is only ever invoked from inside the
+// "user exists" branch below, so no admin Firestore operation can start
+// before authentication is confirmed.
+// =========================================================
+const authCheckingScreen = document.getElementById("authCheckingScreen");
+const loginScreen = document.getElementById("loginScreen");
+const adminAppShell = document.getElementById("adminAppShell");
+const loginEmailInput = document.getElementById("loginEmail");
+const loginPasswordInput = document.getElementById("loginPassword");
+const loginErrorEl = document.getElementById("loginError");
+const loginSubmitBtn = document.getElementById("loginSubmitBtn");
+
+let adminAppInitialized = false; // ensures initAdminApp() runs at most once
+
+function showAuthChecking() {
+  authCheckingScreen.classList.remove("hidden");
+  loginScreen.classList.add("hidden");
+  adminAppShell.classList.add("hidden");
+}
+function showLoginRequired() {
+  authCheckingScreen.classList.add("hidden");
+  loginScreen.classList.remove("hidden");
+  adminAppShell.classList.add("hidden");
+}
+function showAuthenticated() {
+  authCheckingScreen.classList.add("hidden");
+  loginScreen.classList.add("hidden");
+  adminAppShell.classList.remove("hidden");
+}
+function setLoginError(message) {
+  if (message) {
+    loginErrorEl.textContent = message;
+    loginErrorEl.classList.add("show");
+  } else {
+    loginErrorEl.textContent = "";
+    loginErrorEl.classList.remove("show");
+  }
+}
+
+// Maps Firebase Auth error codes to a non-technical, non-leaky message —
+// never surfaces err.message (which can reveal internal Firebase details).
+function mapLoginErrorCode(code) {
+  switch (code) {
+    case "auth/invalid-email":
+      return "Format email tidak valid.";
+    case "auth/user-disabled":
+      return "Akun ini dinonaktifkan. Hubungi pemilik.";
+    case "auth/user-not-found":
+    case "auth/wrong-password":
+    case "auth/invalid-credential":
+      return "Email atau password salah.";
+    case "auth/too-many-requests":
+      return "Terlalu banyak percobaan gagal. Coba lagi nanti.";
+    case "auth/network-request-failed":
+      return "Gagal terhubung ke server. Periksa koneksi internet.";
+    default:
+      return "Gagal masuk. Periksa email dan password, lalu coba lagi.";
+  }
+}
+
+async function attemptLogin() {
+  const email = loginEmailInput.value.trim();
+  const password = loginPasswordInput.value;
+  if (!email || !password) {
+    setLoginError("Email dan password harus diisi.");
+    return;
+  }
+  setLoginError(null);
+  loginSubmitBtn.disabled = true;
+  loginSubmitBtn.textContent = "Memproses...";
+  try {
+    await signInWithEmailAndPassword(auth, email, password);
+    // onAuthStateChanged below drives the transition to AUTHENTICATED —
+    // nothing else to do here on success.
+  } catch (err) {
+    setLoginError(mapLoginErrorCode(err.code));
+  } finally {
+    loginSubmitBtn.disabled = false;
+    loginSubmitBtn.textContent = "Masuk";
+  }
+}
+loginSubmitBtn.addEventListener("click", attemptLogin);
+loginPasswordInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") attemptLogin();
+});
+loginEmailInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") attemptLogin();
+});
+
+showAuthChecking();
+onAuthStateChanged(auth, user => {
+  if (user) {
+    loginEmailInput.value = "";
+    loginPasswordInput.value = "";
+    setLoginError(null);
+    showAuthenticated();
+    if (!adminAppInitialized) {
+      adminAppInitialized = true;
+      initAdminApp();
+    }
+  } else {
+    showLoginRequired();
+  }
+});
+
+function initAdminApp() {
 
 // Foto produk disimpan di Cloudinary (bukan Firebase Storage — akun ini
 // nggak bisa upgrade ke plan Blaze karena kendala metode pembayaran).
@@ -577,6 +749,11 @@ const fmt = n => "Rp " + Math.ceil(n).toLocaleString("id-ID");
 
 document.getElementById("backBtn").addEventListener("click", () => {
   window.location.href = "aul-pos.html";
+});
+document.getElementById("logoutBtn").addEventListener("click", () => {
+  signOut(auth).catch(err => console.error("Gagal keluar:", err));
+  // onAuthStateChanged (registered outside initAdminApp) drives the
+  // transition back to LOGIN_REQUIRED once signOut resolves.
 });
 
 let currentTab = "rekap";
@@ -1879,6 +2056,8 @@ document.getElementById("productSaveBtn").addEventListener("click", async () => 
     saveBtn.textContent = "Simpan Produk";
   }
 });
+
+} // end of initAdminApp()
 </script>
 </body>
 </html>
