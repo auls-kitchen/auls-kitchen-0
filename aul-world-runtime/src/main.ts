@@ -4,6 +4,7 @@ import { reduce } from "./behavior/reducer";
 import { deriveRenderState } from "./render/renderState";
 import { createEventBus } from "./events/bus";
 import { createPixiRendererAdapter } from "./render/adapter/pixiRendererAdapter";
+import { createCanvas2dTestAdapter } from "./render/adapter/canvas2dTestAdapter";
 import { createDomPanel } from "./dom/domPanel";
 import { handleObjectHit } from "./world/hitTestPipeline";
 import { attachResponsiveScale } from "./platform/resize";
@@ -31,7 +32,11 @@ async function bootstrap() {
   let state: WorldState = depthProofActive ? createDepthProofState() : createInitialState();
   let orderingState = createInitialOrderingState();
   const bus = createEventBus();
-  const renderer = createPixiRendererAdapter();
+  // AWR-05 / C5: ?renderer=canvas2d is opt-in only, proving the renderer
+  // adapter boundary is swappable. Normal boot (no param) is unaffected
+  // and always uses createPixiRendererAdapter().
+  const useCanvas2d = new URLSearchParams(window.location.search).get("renderer") === "canvas2d";
+  const renderer = useCanvas2d ? createCanvas2dTestAdapter() : createPixiRendererAdapter();
   await renderer.init(canvasWrap);
   const panel = createDomPanel(domWrap, bus);
   if (depthProofActive) {
