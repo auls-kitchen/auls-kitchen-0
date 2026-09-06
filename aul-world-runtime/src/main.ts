@@ -11,6 +11,7 @@ import { requestGreeting } from "./effects/greetingEffect";
 import { createInitialOrderingState } from "./ordering/types";
 import { reduceOrdering } from "./ordering/reducer";
 import { decideOrderingOutcome } from "./ordering/orderingBoundary";
+import { isDepthProofActive, createDepthProofState, renderDepthProofOverlay } from "./render/depthProof";
 import type { WorldState } from "./state/types";
 
 async function bootstrap() {
@@ -24,12 +25,18 @@ async function bootstrap() {
   const canvasWrap = document.getElementById("awr-canvas-wrap")!;
   const domWrap = document.getElementById("awr-dom-wrap")!;
 
-  let state: WorldState = createInitialState();
+  // AWR-05 Gate 4: ?depth-proof=1 opt-in only. Without it, the normal
+  // AWR-04 scene (createInitialState()) is unchanged and unaffected.
+  const depthProofActive = isDepthProofActive();
+  let state: WorldState = depthProofActive ? createDepthProofState() : createInitialState();
   let orderingState = createInitialOrderingState();
   const bus = createEventBus();
   const renderer = createPixiRendererAdapter();
   await renderer.init(canvasWrap);
   const panel = createDomPanel(domWrap, bus);
+  if (depthProofActive) {
+    renderDepthProofOverlay(root);
+  }
 
   function renderAll() {
     const renderState = deriveRenderState(state, orderingState);

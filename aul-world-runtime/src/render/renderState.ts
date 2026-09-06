@@ -1,4 +1,5 @@
-import type { WorldState, DepthLayer, GreetingStatus, PresentationMode } from "../state/types";
+import type { WorldState, GreetingStatus, PresentationMode } from "../state/types";
+import type { DepthZ } from "../state/depth";
 import type { OrderingState } from "../ordering/types";
 
 // RenderState is a pure projection of WorldState. It contains only
@@ -8,7 +9,7 @@ import type { OrderingState } from "../ordering/types";
 
 export interface RenderObject {
   id: string;
-  layer: DepthLayer;
+  z: DepthZ;
   x: number;
   y: number;
   radius: number;
@@ -53,7 +54,7 @@ export function deriveRenderState(state: WorldState, ordering: OrderingState): R
   return {
     objects: state.objects.map((o) => ({
       id: o.id,
-      layer: o.layer,
+      z: o.z,
       x: o.id === "aul" ? state.aul.x : o.id === "cat-1" ? state.cat.x : o.x,
       y: o.id === "aul" ? state.aul.y : o.id === "cat-1" ? state.cat.y : o.y,
       radius: o.radius,

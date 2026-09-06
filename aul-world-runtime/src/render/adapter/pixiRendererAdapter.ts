@@ -12,15 +12,9 @@
 
 import { Application, Container, Graphics, type FederatedPointerEvent } from "pixi.js";
 import type { RenderState } from "../renderState";
-import type { DepthLayer } from "../../state/types";
+import { depthParallaxFactor } from "../../state/depth";
 import { descriptorKey } from "../../assets/assetBoundary";
 import { VIEW_WIDTH, VIEW_HEIGHT, WORLD_CENTER_X, WORLD_CENTER_Y } from "../../state/worldConstants";
-
-const PARALLAX_FACTOR: Record<DepthLayer, number> = {
-  background: 0.25,
-  midground: 0.6,
-  foreground: 1.0,
-};
 
 const VIEW_W = VIEW_WIDTH;
 const VIEW_H = VIEW_HEIGHT;
@@ -34,7 +28,13 @@ export interface RendererAdapter {
 
 export function createPixiRendererAdapter(): RendererAdapter {
   let app: Application | null = null;
-  let layers: Record<DepthLayer, Container> | null = null;
+  // AWR-05 Gate 3: a single world Container replaces the three fixed
+  // background/midground/foreground Containers. Z0-Z60 is a numeric
+  // depth space, not a set of renderer layers — every object is a direct
+  // child of this one Container, and `sortableChildren` lets Pixi order
+  // them by `zIndex` (set from the object's own numeric `z` every
+  // render) instead of by insertion order.
+  let world: Container | null = null;
   let sprites = new Map<string, Graphics>();
   // Loaded-resource cache lives ONLY here, keyed by asset descriptor —
   // this is the "asset identifier -> loaded resource" boundary from
@@ -62,15 +62,13 @@ export function createPixiRendererAdapter(): RendererAdapter {
       });
       container.appendChild(app.canvas);
 
-      const background = new Container();
-      const midground = new Container();
-      const foreground = new Container();
-      app.stage.addChild(background, midground, foreground);
-      layers = { background, midground, foreground };
+      world = new Container();
+      world.sortableChildren = true;
+      app.stage.addChild(world);
     },
 
     render(state: RenderState): void {
-      if (!app || !layers) return;
+      if (!app || !world) return;
 
       for (const obj of state.objects) {
         let sprite = sprites.get(obj.id);
@@ -81,7 +79,7 @@ export function createPixiRendererAdapter(): RendererAdapter {
           sprite.on("pointerdown", (_e: FederatedPointerEvent) => {
             pointerCallback?.(obj.id, "canvas");
           });
-          layers[obj.layer].addChild(sprite);
+          world.addChild(sprite);
           sprites.set(obj.id, sprite);
         }
         // Recolor by clearing/redrawing rather than swapping textures —
@@ -91,32 +89,27 @@ export function createPixiRendererAdapter(): RendererAdapter {
         if (obj.highlighted) {
           sprite.stroke({ width: 3, color: 0xffffff, alpha: 0.8 });
         }
-        sprite.x = obj.x;
-        sprite.y = obj.y;
+
+        // Draw order comes SOLELY from the object's own numeric depth —
+        // never id, class, y position, array index, insertion order, or
+        // a layer name. `world.sortChildren()` below applies this.
+        sprite.zIndex = obj.z;
+
+        // Camera transform: computed per-object now, since parallax is a
+        // continuous function of numeric depth (depthParallaxFactor)
+        // rather than a fixed per-container value. `world` itself stays
+        // at identity transform (position 0,0, scale 1) — every sprite's
+        // own x/y/scale already encodes the full camera-adjusted screen
+        // position, using exactly the AWR-04 formula, just evaluated
+        // per-object instead of per-layer-container.
+        const pf = depthParallaxFactor(obj.z);
+        const effectiveZoom = 1 + (state.camera.zoom - 1) * pf;
+        sprite.x = WORLD_CENTER_X + (obj.x - state.camera.x) * effectiveZoom;
+        sprite.y = WORLD_CENTER_Y + (obj.y - state.camera.y) * effectiveZoom;
+        sprite.scale.set(effectiveZoom);
       }
 
-      // Camera transform: applied uniformly to each depth layer, scaled
-      // by that layer's parallax factor. This is the ONLY place camera
-      // math touches renderer containers — camera state itself
-      // (render/camera state on WorldState) has no idea PixiJS exists.
-      //
-      // Convention: camera.x/y is the world point centered on screen;
-      // "at rest" (WORLD_VIEW) that point is the canvas center, so
-      // world objects render at exactly their authored coordinates
-      // when the camera is not focused on anything. Object screen
-      // position = centerX + (obj.x - camera.x) * effectiveZoom, which
-      // for the foreground layer (parallax factor 1) is applied via
-      // the layer's own transform rather than per-object math.
-      const centerX = WORLD_CENTER_X;
-      const centerY = WORLD_CENTER_Y;
-      for (const layerName of Object.keys(layers) as DepthLayer[]) {
-        const layer = layers[layerName];
-        const pf = PARALLAX_FACTOR[layerName];
-        const effectiveZoom = 1 + (state.camera.zoom - 1) * pf;
-        layer.scale.set(effectiveZoom);
-        layer.x = centerX - state.camera.x * effectiveZoom;
-        layer.y = centerY - state.camera.y * effectiveZoom;
-      }
+      world.sortChildren();
     },
 
     onObjectPointerDown(callback) {
@@ -126,7 +119,7 @@ export function createPixiRendererAdapter(): RendererAdapter {
     destroy(): void {
       app?.destroy(true, { children: true });
       app = null;
-      layers = null;
+      world = null;
       sprites = new Map();
       shapeCache = new Map();
     },

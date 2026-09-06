@@ -1,13 +1,13 @@
 // Domain state types. This module knows nothing about PixiJS, DOM, or Firebase.
 
-export type ObjectClass = "Decorative" | "Reactive" | "Character" | "Portal" | "Event";
+import type { DepthZ } from "./depth";
 
-export type DepthLayer = "background" | "midground" | "foreground";
+export type ObjectClass = "Decorative" | "Reactive" | "Character" | "Portal" | "Event";
 
 export interface WorldObject {
   id: string;
   class: ObjectClass;
-  layer: DepthLayer;
+  z: DepthZ;
   x: number;
   y: number;
   radius: number;
