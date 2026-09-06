@@ -1,0 +1,59 @@
+name: AUL World Runtime — Pages Preview (Manual, AWR-04P)
+
+# AWR-04P temporary physical-test delivery bridge. Manual trigger ONLY.
+# Builds and publishes ONLY aul-world-runtime/dist/ — the isolated AUL
+# World Runtime prototype. Never touches the production root application
+# (aul-pos.html, aul-adm.html, functions/, Firebase, Firestore,
+# Cloudflare). This is not a production deployment.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: aul-world-runtime/package-lock.json
+
+      - name: Install dependencies (aul-world-runtime only)
+        working-directory: aul-world-runtime
+        run: npm ci
+
+      - name: Build (existing build script, unmodified)
+        working-directory: aul-world-runtime
+        run: npm run build
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact (aul-world-runtime/dist contents only)
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: aul-world-runtime/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

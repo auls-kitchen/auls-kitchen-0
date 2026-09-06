@@ -4,6 +4,7 @@ import { defineConfig } from "vite";
 // no connection to Firebase, no deployment target configured here.
 export default defineConfig({
   root: __dirname,
+  base: "/auls-kitchen-0/",
   build: {
     outDir: "dist",
   },
