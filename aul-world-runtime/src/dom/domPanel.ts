@@ -32,6 +32,17 @@ export function createDomPanel(container: HTMLElement, bus: EventBus) {
       <button data-greeting="failure">Request Greeting (Failure)</button>
     </div>
     <pre class="awr-status" id="awr-greeting-status">greeting=idle</pre>
+    <h2>World &harr; Ordering Boundary Proof (AWR-03)</h2>
+    <p class="awr-hint">
+      MENU_INTENT -&gt; Ordering boundary -&gt; ORDERING_READY/ORDERING_REJECTED -&gt; World reducer -&gt; state -&gt; render.
+      These buttons only emit semantic events; they never call an Ordering reducer or implementation directly.
+    </p>
+    <div class="awr-row">
+      <button data-menu-intent="ready">Enter Ordering (Menu Portal)</button>
+      <button data-menu-intent="reject">Enter Ordering (Force Rejection)</button>
+      <button data-return-to-world>Return to World</button>
+    </div>
+    <pre class="awr-status" id="awr-ordering-status">presentation=WORLD ordering=idle</pre>
     <ul class="awr-log" id="awr-log"></ul>
   `;
   container.appendChild(panel);
@@ -62,8 +73,27 @@ export function createDomPanel(container: HTMLElement, bus: EventBus) {
     });
   });
 
+  // Emits only the semantic MENU_INTENT / RETURN_TO_WORLD events — this
+  // panel never imports or calls ordering/reducer.ts or
+  // ordering/orderingBoundary.ts directly.
+  panel.querySelectorAll<HTMLButtonElement>("button[data-menu-intent]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      bus.emit({
+        type: "MENU_INTENT",
+        source: "dom",
+        forceReject: btn.dataset.menuIntent === "reject",
+      });
+    });
+  });
+  panel.querySelectorAll<HTMLButtonElement>("button[data-return-to-world]").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      bus.emit({ type: "RETURN_TO_WORLD", source: "dom" });
+    });
+  });
+
   const statusEl = panel.querySelector<HTMLPreElement>("#awr-status")!;
   const greetingStatusEl = panel.querySelector<HTMLPreElement>("#awr-greeting-status")!;
+  const orderingStatusEl = panel.querySelector<HTMLPreElement>("#awr-ordering-status")!;
   const logEl = panel.querySelector<HTMLUListElement>("#awr-log")!;
 
   return {
@@ -76,6 +106,11 @@ export function createDomPanel(container: HTMLElement, bus: EventBus) {
           : g.status === "failure"
             ? `greeting=failure error="${g.error}"`
             : `greeting=${g.status}`;
+      const o = renderState.ordering;
+      orderingStatusEl.textContent =
+        o.status === "rejected"
+          ? `presentation=${renderState.presentationMode} ordering=rejected reason="${o.rejectionReason}"`
+          : `presentation=${renderState.presentationMode} ordering=${o.status}`;
       logEl.innerHTML = eventLog.map((line) => `<li>${line}</li>`).join("");
     },
   };

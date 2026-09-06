@@ -62,16 +62,18 @@ export interface CustomerState {
   present: boolean;
 }
 
-export interface OrderingState {
-  // Ordering is a separate domain. World only knows a portal exists;
-  // it never reaches into ordering's own state or Firestore.
-  portalAvailable: boolean;
-}
-
 export interface SystemState {
   lastEventLog: string[];
   frame: number;
 }
+
+// Which experience World is currently presenting. This is a WorldState
+// (presentation) concern only — it says nothing about Ordering's own
+// internal status (requested/ready/rejected), which lives entirely in
+// ordering/types.ts, a separate module World does not import. World only
+// ever learns Ordering's outcome via the semantic ORDERING_READY /
+// ORDERING_REJECTED events (see behavior/reducer.ts and events/types.ts).
+export type PresentationMode = "WORLD" | "ORDERING";
 
 export interface WorldState {
   objects: WorldObject[];
@@ -79,6 +81,6 @@ export interface WorldState {
   aul: AulState;
   cat: CatState;
   customer: CustomerState;
-  ordering: OrderingState;
   system: SystemState;
+  presentationMode: PresentationMode;
 }

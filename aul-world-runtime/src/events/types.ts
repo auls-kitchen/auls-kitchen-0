@@ -47,6 +47,38 @@ export interface AulGreetingFailedEvent {
   reason: string;
 }
 
+// AWR-03 World <-> Ordering boundary proof.
+//
+// MENU_INTENT is the ONLY event World is allowed to send toward
+// Ordering, and it deliberately carries no business data (no productId,
+// price, modifier, cart, or any Firebase/Firestore/DOM/renderer
+// reference) — just enough to say "customer requests to enter
+// Ordering." `forceReject` is a test-determinism flag only (mirroring
+// AWR-02's `forceFailure`), not business data.
+export interface MenuIntentEvent {
+  type: "MENU_INTENT";
+  source: "canvas" | "dom";
+  forceReject: boolean;
+}
+
+// Result events. Emitted only by ordering/orderingBoundary.ts, never
+// directly by World or DOM code.
+export interface OrderingReadyEvent {
+  type: "ORDERING_READY";
+}
+
+export interface OrderingRejectedEvent {
+  type: "ORDERING_REJECTED";
+  reason: string;
+}
+
+// The only event Ordering-side UI (here, the DOM test panel standing in
+// for it) is allowed to send back toward World.
+export interface ReturnToWorldEvent {
+  type: "RETURN_TO_WORLD";
+  source: "canvas" | "dom";
+}
+
 export type AppEvent =
   | ObjectInteractedEvent
   | CameraFocusRequestedEvent
@@ -54,4 +86,8 @@ export type AppEvent =
   | TickEvent
   | AulGreetingRequestedEvent
   | AulGreetingReadyEvent
-  | AulGreetingFailedEvent;
+  | AulGreetingFailedEvent
+  | MenuIntentEvent
+  | OrderingReadyEvent
+  | OrderingRejectedEvent
+  | ReturnToWorldEvent;

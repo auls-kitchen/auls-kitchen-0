@@ -10,7 +10,7 @@ export function createInitialState(): WorldState {
       { id: "bg-hill-1", class: "Decorative", layer: "background", x: 120, y: 140, radius: 60, colorHex: 0x2c3a4a, label: "hill" },
       { id: "bg-hill-2", class: "Decorative", layer: "background", x: 420, y: 120, radius: 50, colorHex: 0x2c3a4a, label: "hill" },
       { id: "mid-stall", class: "Reactive", layer: "midground", x: 260, y: 260, radius: 40, colorHex: 0x5a4630, label: "stall" },
-      { id: "portal-menu", class: "Portal", layer: "midground", x: 460, y: 250, radius: 30, colorHex: 0xd98c3a, label: "menu portal" },
+      { id: "menu_portal", class: "Portal", layer: "midground", x: 460, y: 250, radius: 30, colorHex: 0xd98c3a, label: "menu portal" },
       { id: "cat-1", class: "Character", layer: "foreground", x: 340, y: 320, radius: 18, colorHex: 0xcccccc, label: "cat" },
       { id: "aul", class: "Character", layer: "foreground", x: 200, y: 310, radius: 26, colorHex: 0x1a1a1a, label: "Aul (placeholder)" },
     ],
@@ -27,7 +27,7 @@ export function createInitialState(): WorldState {
     },
     cat: { x: 340, y: 320, asleep: true },
     customer: { present: false },
-    ordering: { portalAvailable: true },
     system: { lastEventLog: [], frame: 0 },
+    presentationMode: "WORLD",
   };
 }

@@ -8,6 +8,9 @@ import { createDomPanel } from "./dom/domPanel";
 import { handleObjectHit } from "./world/hitTestPipeline";
 import { attachResponsiveScale } from "./platform/resize";
 import { requestGreeting } from "./effects/greetingEffect";
+import { createInitialOrderingState } from "./ordering/types";
+import { reduceOrdering } from "./ordering/reducer";
+import { decideOrderingOutcome } from "./ordering/orderingBoundary";
 import type { WorldState } from "./state/types";
 
 async function bootstrap() {
@@ -22,33 +25,42 @@ async function bootstrap() {
   const domWrap = document.getElementById("awr-dom-wrap")!;
 
   let state: WorldState = createInitialState();
+  let orderingState = createInitialOrderingState();
   const bus = createEventBus();
   const renderer = createPixiRendererAdapter();
   await renderer.init(canvasWrap);
   const panel = createDomPanel(domWrap, bus);
 
   function renderAll() {
-    const renderState = deriveRenderState(state);
+    const renderState = deriveRenderState(state, orderingState);
     renderer.render(renderState);
     panel.update(renderState, state.system.lastEventLog);
   }
 
-  // EVENT -> DISPATCH -> REDUCER -> NEW STATE -> DERIVED RENDER STATE -> CANVAS/DOM
+  // EVENT -> DISPATCH -> REDUCER(S) -> NEW STATE -> DERIVED RENDER STATE -> CANVAS/DOM
   //
-  // AWR-02 adds a second, explicit branch for exactly one event type:
-  // AUL_GREETING_REQUESTED is (1) reduced synchronously like any other
-  // event (so the "pending" state appears immediately) AND (2) routed to
-  // the effect layer, which owns the async call to the mock external
-  // service and reports back with its own semantic result event
-  // (AUL_GREETING_READY / AUL_GREETING_FAILED) through this same bus —
-  // re-entering this exact subscriber, not some separate path. This is
-  // the whole "effect router": one explicit `if`, not a generic
-  // dispatch-table/workflow framework.
+  // AWR-03 adds a second, independent reducer (reduceOrdering) alongside
+  // World's own `reduce()`. Both run for every event on the same shared
+  // bus and each owns only its own state slice (WorldState vs
+  // OrderingState) — neither reducer imports the other's state module.
+  // This is still exactly two plain function calls, not a
+  // combineReducers-style framework.
+  //
+  // AWR-02's effect-router pattern is reused unchanged for AWR-03's
+  // World -> Ordering boundary: seeing MENU_INTENT, main.ts calls the
+  // Ordering-side boundary decision (ordering/orderingBoundary.ts, pure,
+  // synchronous — no external system or async boundary is required or
+  // permitted for this proof) and emits whatever it returns back onto
+  // the same bus, re-entering this exact subscriber.
   bus.subscribe((event) => {
     state = reduce(state, event);
+    orderingState = reduceOrdering(orderingState, event);
     renderAll();
     if (event.type === "AUL_GREETING_REQUESTED") {
       requestGreeting(bus, { forceFailure: event.forceFailure, requestId: state.aul.greeting.requestId });
+    }
+    if (event.type === "MENU_INTENT") {
+      bus.emit(decideOrderingOutcome(event));
     }
   });
 
