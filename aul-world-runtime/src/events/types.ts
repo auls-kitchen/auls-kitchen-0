@@ -23,8 +23,35 @@ export interface TickEvent {
   deltaMs: number;
 }
 
+// AWR-02 external-effects proof. AUL_GREETING_REQUESTED is a genuine
+// effect request (routed to the mock external service in main.ts, see
+// effects/greetingEffect.ts) — distinct from AWR-01's synchronous
+// DOM_PANEL_ACTION("GREET_AUL"), which is left unchanged.
+export interface AulGreetingRequestedEvent {
+  type: "AUL_GREETING_REQUESTED";
+  forceFailure: boolean;
+  source: "dom";
+}
+
+// Result events. Only ever emitted by the effect layer after the mock
+// service settles — never emitted directly by DOM or canvas code.
+export interface AulGreetingReadyEvent {
+  type: "AUL_GREETING_READY";
+  requestId: number;
+  message: string;
+}
+
+export interface AulGreetingFailedEvent {
+  type: "AUL_GREETING_FAILED";
+  requestId: number;
+  reason: string;
+}
+
 export type AppEvent =
   | ObjectInteractedEvent
   | CameraFocusRequestedEvent
   | DomPanelActionEvent
-  | TickEvent;
+  | TickEvent
+  | AulGreetingRequestedEvent
+  | AulGreetingReadyEvent
+  | AulGreetingFailedEvent;

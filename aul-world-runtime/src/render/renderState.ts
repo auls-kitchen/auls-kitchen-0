@@ -1,4 +1,4 @@
-import type { WorldState, DepthLayer } from "../state/types";
+import type { WorldState, DepthLayer, GreetingStatus } from "../state/types";
 
 // RenderState is a pure projection of WorldState. It contains only
 // plain data (numbers/strings) — no PixiJS types appear here. The
@@ -22,10 +22,17 @@ export interface RenderCamera {
   mode: string;
 }
 
+export interface RenderGreeting {
+  status: GreetingStatus;
+  message: string | null;
+  error: string | null;
+}
+
 export interface RenderState {
   objects: RenderObject[];
   camera: RenderCamera;
   hudText: string;
+  greeting: RenderGreeting;
 }
 
 export function deriveRenderState(state: WorldState): RenderState {
@@ -52,6 +59,11 @@ export function deriveRenderState(state: WorldState): RenderState {
       zoom: state.camera.targetZoom,
       mode: state.camera.mode,
     },
-    hudText: `mode=${state.camera.mode} aul=${state.aul.mood} interactions=${state.aul.interactionCount} frame=${state.system.frame}`,
+    hudText: `mode=${state.camera.mode} aul=${state.aul.mood} interactions=${state.aul.interactionCount} frame=${state.system.frame} greeting=${state.aul.greeting.status}`,
+    greeting: {
+      status: state.aul.greeting.status,
+      message: state.aul.greeting.message,
+      error: state.aul.greeting.error,
+    },
   };
 }

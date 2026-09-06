@@ -7,6 +7,7 @@ import { createPixiRendererAdapter } from "./render/adapter/pixiRendererAdapter"
 import { createDomPanel } from "./dom/domPanel";
 import { handleObjectHit } from "./world/hitTestPipeline";
 import { attachResponsiveScale } from "./platform/resize";
+import { requestGreeting } from "./effects/greetingEffect";
 import type { WorldState } from "./state/types";
 
 async function bootstrap() {
@@ -33,9 +34,22 @@ async function bootstrap() {
   }
 
   // EVENT -> DISPATCH -> REDUCER -> NEW STATE -> DERIVED RENDER STATE -> CANVAS/DOM
+  //
+  // AWR-02 adds a second, explicit branch for exactly one event type:
+  // AUL_GREETING_REQUESTED is (1) reduced synchronously like any other
+  // event (so the "pending" state appears immediately) AND (2) routed to
+  // the effect layer, which owns the async call to the mock external
+  // service and reports back with its own semantic result event
+  // (AUL_GREETING_READY / AUL_GREETING_FAILED) through this same bus —
+  // re-entering this exact subscriber, not some separate path. This is
+  // the whole "effect router": one explicit `if`, not a generic
+  // dispatch-table/workflow framework.
   bus.subscribe((event) => {
     state = reduce(state, event);
     renderAll();
+    if (event.type === "AUL_GREETING_REQUESTED") {
+      requestGreeting(bus, { forceFailure: event.forceFailure, requestId: state.aul.greeting.requestId });
+    }
   });
 
   // CUSTOMER INPUT -> HIT TEST (delegated to renderer) -> OBJECT ID -> ...

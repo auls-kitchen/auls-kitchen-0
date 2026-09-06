@@ -97,6 +97,49 @@ export function reduce(state: WorldState, event: AppEvent): WorldState {
     case "TICK": {
       return { ...state, system: { ...state.system, frame: state.system.frame + 1 } };
     }
+    // AWR-02 external-effects proof. The reducer only ever sees the
+    // REQUEST and the RESULT events — it never calls the mock service and
+    // never awaits anything itself; the async work happens entirely in
+    // effects/greetingEffect.ts, outside the reducer.
+    case "AUL_GREETING_REQUESTED": {
+      const requestId = state.aul.greeting.requestId + 1;
+      const next: WorldState = {
+        ...state,
+        aul: { ...state.aul, greeting: { requestId, status: "pending", message: null, error: null } },
+      };
+      return { ...next, system: logEvent(next, `AUL_GREETING_REQUESTED(forceFailure=${event.forceFailure})`) };
+    }
+    case "AUL_GREETING_READY": {
+      // Guard against a stale result: if a newer request has been issued
+      // since this one was sent, this result no longer describes the
+      // current pending request and must not overwrite it.
+      if (event.requestId !== state.aul.greeting.requestId) {
+        return { ...state, system: logEvent(state, `AUL_GREETING_READY ignored (stale requestId ${event.requestId})`) };
+      }
+      const next: WorldState = {
+        ...state,
+        aul: {
+          ...state.aul,
+          mood: "happy",
+          greeting: { ...state.aul.greeting, status: "success", message: event.message, error: null },
+        },
+      };
+      return { ...next, system: logEvent(next, `AUL_GREETING_READY("${event.message}")`) };
+    }
+    case "AUL_GREETING_FAILED": {
+      if (event.requestId !== state.aul.greeting.requestId) {
+        return { ...state, system: logEvent(state, `AUL_GREETING_FAILED ignored (stale requestId ${event.requestId})`) };
+      }
+      const next: WorldState = {
+        ...state,
+        aul: {
+          ...state.aul,
+          mood: "idle",
+          greeting: { ...state.aul.greeting, status: "failure", message: null, error: event.reason },
+        },
+      };
+      return { ...next, system: logEvent(next, `AUL_GREETING_FAILED("${event.reason}")`) };
+    }
     default:
       return state;
   }

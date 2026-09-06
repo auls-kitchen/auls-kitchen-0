@@ -30,11 +30,26 @@ export interface CameraState {
   targetZoom: number;
 }
 
+export type GreetingStatus = "idle" | "pending" | "success" | "failure";
+
+// Effect-lifecycle status for the AWR-02 external-effects proof. This is
+// still plain domain data — no PixiJS, no DOM, no reference to the mock
+// service or the effect layer that produced it. requestId guards against
+// a stale async result overwriting a newer request's outcome (see
+// behavior/reducer.ts).
+export interface AulGreetingState {
+  requestId: number;
+  status: GreetingStatus;
+  message: string | null;
+  error: string | null;
+}
+
 export interface AulState {
   x: number;
   y: number;
   mood: "idle" | "happy" | "curious";
   interactionCount: number;
+  greeting: AulGreetingState;
 }
 
 export interface CatState {

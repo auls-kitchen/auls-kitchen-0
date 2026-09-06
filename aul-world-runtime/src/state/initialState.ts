@@ -18,7 +18,13 @@ export function createInitialState(): WorldState {
     // render/adapter/pixiRendererAdapter.ts for why this makes objects
     // render at their authored coordinates when not focused.
     camera: { mode: "WORLD_VIEW", targetX: WORLD_CENTER_X, targetY: WORLD_CENTER_Y, targetZoom: 1 },
-    aul: { x: 200, y: 310, mood: "idle", interactionCount: 0 },
+    aul: {
+      x: 200,
+      y: 310,
+      mood: "idle",
+      interactionCount: 0,
+      greeting: { requestId: 0, status: "idle", message: null, error: null },
+    },
     cat: { x: 340, y: 320, asleep: true },
     customer: { present: false },
     ordering: { portalAvailable: true },
