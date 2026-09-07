@@ -87,6 +87,43 @@ function canEndSession(context) {
   return { allowed: true };
 }
 
+/**
+ * Derives the initial Session lifecycle state from already-hydrated
+ * persisted facts (STEP 61/62). This is NOT a live customer event - it
+ * reconstructs a starting phase from storage, and deliberately does NOT
+ * go through applyEvent() and does NOT fabricate a FIRST_CART_ITEM_ADDED
+ * or SUBMISSION_STARTED event that never actually happened live. Session
+ * lifecycle events remain live-only; this function is a separate,
+ * smaller concept: "what phase does this persisted snapshot represent,"
+ * not "what event just occurred."
+ *
+ * Precedence (STEP 61 S3, STEP 62 S3 - locked order for this function):
+ *   1. hasAuthoritativeResult -> CONFIRMATION. A persisted authoritative
+ *      result is proof the backend already committed successfully for
+ *      its idempotencyKey (STEP 61A Issue A) and takes precedence over
+ *      any coexisting stale/unresolved SubmissionAttempt. The caller is
+ *      responsible for having already reconciled a same-idempotencyKey
+ *      match before calling this with hasAuthoritativeResult true while
+ *      an unresolved attempt also exists; a genuine key mismatch is a
+ *      caller-level hydration anomaly, never guessed at here - this
+ *      function only ever sees the single boolean the caller decided.
+ *   2. an unresolved SubmissionAttempt (IN_FLIGHT or UNKNOWN) exists
+ *      -> AWAITING_OUTCOME.
+ *   3. no unresolved submission and the Cart has at least one line
+ *      -> ACTIVE.
+ *   4. otherwise -> IDLE.
+ *
+ * @param {{hasAuthoritativeResult?: boolean, submissionStatus?: string|null, cartHasLines?: boolean}} [facts]
+ * @returns {string} one of SessionStates
+ */
+function deriveInitialSessionState(facts) {
+  const safeFacts = facts || {};
+  if (safeFacts.hasAuthoritativeResult) return CONFIRMATION;
+  if (AMBIGUOUS_SUBMISSION_STATUSES.includes(safeFacts.submissionStatus)) return AWAITING_OUTCOME;
+  if (safeFacts.cartHasLines) return ACTIVE;
+  return IDLE;
+}
+
 function eligibleStatesFor(eventType) {
   return eventType === EventTypes.CUSTOMER_CANCELLED ? [ACTIVE] : [CONFIRMATION];
 }
@@ -192,5 +229,6 @@ module.exports = {
   EventTypes,
   applyEvent,
   canEndSession,
+  deriveInitialSessionState,
   requestSessionEnd,
 };
