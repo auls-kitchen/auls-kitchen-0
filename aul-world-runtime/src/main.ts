@@ -9,9 +9,7 @@ import { createDomPanel } from "./dom/domPanel";
 import { handleObjectHit } from "./world/hitTestPipeline";
 import { attachResponsiveScale } from "./platform/resize";
 import { requestGreeting } from "./effects/greetingEffect";
-import { createInitialOrderingState } from "./ordering/types";
-import { reduceOrdering } from "./ordering/reducer";
-import { decideOrderingOutcome } from "./ordering/orderingBoundary";
+import { createInitialOrderingState, ordering1Contract, orderingAltContract } from "./ordering/types";
 import { isDepthProofActive, createDepthProofState, renderDepthProofOverlay } from "./render/depthProof";
 import type { WorldState } from "./state/types";
 
@@ -37,6 +35,12 @@ async function bootstrap() {
   // and always uses createPixiRendererAdapter().
   const useCanvas2d = new URLSearchParams(window.location.search).get("renderer") === "canvas2d";
   const renderer = useCanvas2d ? createCanvas2dTestAdapter() : createPixiRendererAdapter();
+  // RT-11: ?ordering=alt is opt-in only and fully independent of the
+  // renderer selection above, proving the Ordering boundary is
+  // implementation-swappable. Normal boot (no param) is unaffected and
+  // always uses ordering1Contract (the existing Ordering implementation).
+  const useOrderingAlt = new URLSearchParams(window.location.search).get("ordering") === "alt";
+  const activeOrdering = useOrderingAlt ? orderingAltContract : ordering1Contract;
   await renderer.init(canvasWrap);
   const panel = createDomPanel(domWrap, bus);
   if (depthProofActive) {
@@ -66,13 +70,13 @@ async function bootstrap() {
   // the same bus, re-entering this exact subscriber.
   bus.subscribe((event) => {
     state = reduce(state, event);
-    orderingState = reduceOrdering(orderingState, event);
+    orderingState = activeOrdering.reduceOrdering(orderingState, event);
     renderAll();
     if (event.type === "AUL_GREETING_REQUESTED") {
       requestGreeting(bus, { forceFailure: event.forceFailure, requestId: state.aul.greeting.requestId });
     }
     if (event.type === "MENU_INTENT") {
-      bus.emit(decideOrderingOutcome(event));
+      bus.emit(activeOrdering.decideOrderingOutcome(event));
     }
   });
 

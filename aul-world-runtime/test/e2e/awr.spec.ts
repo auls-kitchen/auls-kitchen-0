@@ -39,6 +39,36 @@ async function clickWorldPoint(page: Page, point: { x: number; y: number }): Pro
   await page.mouse.click(box.x + point.x, box.y + point.y);
 }
 
+// RT-11 Phase 5: R4/R5's assertion bodies are extracted into these two
+// shared functions, verbatim (moved, not altered), so the identical
+// assertion logic can be reused unchanged both by the existing
+// renderer-parametrized suite below and by the new Ordering-boundary
+// replacement experiment (Ordering1 vs Ordering2, ?ordering=alt) —
+// "one shared R4/R5 body with parametrized navigation," not two
+// divergent copies.
+async function runR4(page: Page): Promise<void> {
+  await clickWorldPoint(page, MENU_PORTAL);
+  await page.waitForTimeout(150);
+  const status = await hud(page);
+  expect(status).toContain("mode=MENU_FOCUS");
+  expect(status).toContain("presentation=ORDERING");
+  expect(await orderingStatus(page)).toContain("ordering=ready");
+  const log = await eventLog(page);
+  expect(log.some((line) => line.includes("MENU_INTENT"))).toBe(true);
+  expect(log.some((line) => line.includes("ORDERING_READY"))).toBe(true);
+}
+
+async function runR5(page: Page): Promise<void> {
+  await clickWorldPoint(page, MENU_PORTAL);
+  await page.waitForTimeout(150);
+  await page.click("button[data-return-to-world]");
+  await page.waitForTimeout(150);
+  const status = await hud(page);
+  expect(status).toContain("mode=WORLD_VIEW");
+  expect(status).toContain("presentation=WORLD");
+  expect(await orderingStatus(page)).toContain("ordering=idle");
+}
+
 for (const renderer of RENDERERS) {
   test.describe(`AWR regression — ${renderer.label}`, () => {
     let errors: string[] = [];
@@ -91,26 +121,11 @@ for (const renderer of RENDERERS) {
     });
 
     test("R4: World -> Ordering boundary (Menu Portal)", async ({ page }) => {
-      await clickWorldPoint(page, MENU_PORTAL);
-      await page.waitForTimeout(150);
-      const status = await hud(page);
-      expect(status).toContain("mode=MENU_FOCUS");
-      expect(status).toContain("presentation=ORDERING");
-      expect(await orderingStatus(page)).toContain("ordering=ready");
-      const log = await eventLog(page);
-      expect(log.some((line) => line.includes("MENU_INTENT"))).toBe(true);
-      expect(log.some((line) => line.includes("ORDERING_READY"))).toBe(true);
+      await runR4(page);
     });
 
     test("R5: Ordering -> World return", async ({ page }) => {
-      await clickWorldPoint(page, MENU_PORTAL);
-      await page.waitForTimeout(150);
-      await page.click("button[data-return-to-world]");
-      await page.waitForTimeout(150);
-      const status = await hud(page);
-      expect(status).toContain("mode=WORLD_VIEW");
-      expect(status).toContain("presentation=WORLD");
-      expect(await orderingStatus(page)).toContain("ordering=idle");
+      await runR5(page);
     });
 
     test("R6: reload recovery", async ({ page }) => {
@@ -162,6 +177,48 @@ for (const renderer of RENDERERS) {
 
       await page.click("button[data-return-to-world]");
       await page.waitForTimeout(150);
+    });
+  });
+}
+
+// RT-11 Phase 5: the empirical Ordering-boundary replacement experiment.
+// Experiment A (Ordering1, default) and Experiment B (Ordering2,
+// ?ordering=alt) run the exact same runR4/runR5 bodies defined above —
+// unchanged, unweakened, no ordering-variant-specific branching. Only
+// the navigation query differs. R1/R2/R3/R6/R7 are NOT re-run here —
+// they are orthogonal to the Ordering boundary and remain exactly as
+// structured in the renderer-parametrized suite above.
+const ORDERING_VARIANTS = [
+  { label: "ordering1 (default)", query: "" },
+  { label: "ordering2 (?ordering=alt)", query: "?ordering=alt" },
+];
+
+for (const variant of ORDERING_VARIANTS) {
+  test.describe(`AWR Ordering-boundary replacement experiment — ${variant.label}`, () => {
+    let errors: string[] = [];
+
+    test.beforeEach(async ({ page }) => {
+      errors = [];
+      page.on("pageerror", (e) => errors.push(`pageerror: ${e.message}`));
+      page.on("console", (m) => {
+        if (m.type() === "error") errors.push(`console.error: ${m.text()}`);
+      });
+      await page.goto(variant.query, { waitUntil: "networkidle" });
+      await page.waitForSelector("canvas", { timeout: 10000 });
+      await page.waitForTimeout(300);
+    });
+
+    test.afterEach(() => {
+      const unexpected = errors.filter((e) => !e.includes("404"));
+      expect(unexpected, `unexpected console/page errors: ${JSON.stringify(unexpected)}`).toEqual([]);
+    });
+
+    test("R4: World -> Ordering boundary (Menu Portal)", async ({ page }) => {
+      await runR4(page);
+    });
+
+    test("R5: Ordering -> World return", async ({ page }) => {
+      await runR5(page);
     });
   });
 }
