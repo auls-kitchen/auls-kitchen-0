@@ -329,4 +329,9 @@ module.exports = {
   projectExperienceSnapshot,
   projectOrderOutcomeFromActionResult,
   mapRejectionReason,
+  // Additive STEP 70 export: reused as-is (zero behavior change) by
+  // experienceEvents.js so ORDER_OUTCOME_CHANGED's CONFIRMED payload is
+  // whitelisted through the SAME already-proven-safe field reconstruction,
+  // rather than a second, duplicated implementation of the same rule.
+  projectAuthoritativeResult,
 };
