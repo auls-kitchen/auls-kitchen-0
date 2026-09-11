@@ -5,6 +5,7 @@
   "description": "Isolated Kiosk browser build pipeline (STEP 81). Bundles kiosk/browser/createBrowserKiosk.js and its existing CommonJS Kiosk dependency graph into one browser-loadable ESM artifact via esbuild. Not wired into production. Not deployed. The Kiosk domain source under kiosk/**/*.js remains CommonJS and untouched - this package only adds a build step on top of it. Firebase SDK is never imported by that source (it is received via dependency injection), so it is never bundled here either.",
   "scripts": {
     "build": "esbuild browser/createBrowserKiosk.js --bundle --platform=browser --format=esm --target=es2020 --sourcemap --outfile=dist/createBrowserKiosk.js",
+    "build:persistence-test": "esbuild persistence/indexedDbAdapter.js persistence/persistenceAdapter.js --bundle --platform=browser --format=esm --target=es2020 --sourcemap --outdir=dist",
     "test:browser": "playwright test"
   },
   "devDependencies": {
