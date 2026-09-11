@@ -1,0 +1,159 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Kiosk Browser Verification Harness (STEP 83) - TEST ONLY</title>
+</head>
+<body>
+<!--
+  Kiosk browser verification harness (STEP 83).
+
+  TEST INFRASTRUCTURE ONLY - this file is never part of the production
+  Kiosk browser entry, never bundled by esbuild, and never deployed. Its
+  only job is to load the REAL, unmodified generated artifact
+  (../dist/createBrowserKiosk.js, produced by STEP 81's esbuild build)
+  in an actual browser engine, construct it with fully deterministic,
+  local fake Firebase dependencies, and expose the result to Playwright
+  through the one test-only global this harness defines
+  (`window.__kioskTest`).
+
+  This global exists ONLY here. It must never appear in
+  kiosk/browser/createBrowserKiosk.js or any other kiosk/**/*.js
+  production/domain file - the production Kiosk architecture remains
+  entirely global-free, unchanged by this file's existence.
+
+  No Firebase SDK is imported here (no gstatic.com reference anywhere
+  in this file). No real network call is made. beginCustomerSession()
+  is deliberately never called - this harness proves artifact loading +
+  browser execution + createBrowserKiosk() construction only, per
+  STEP 83's own scope boundary (IndexedDB/Auth/OrderIntent verification
+  is explicitly out of scope, reserved for a later step).
+-->
+<script type="module">
+  import kioskModule from "../dist/createBrowserKiosk.js";
+  const { createBrowserKiosk } = kioskModule;
+
+  /**
+   * A fully deterministic, local, in-page fake of the seven Firebase
+   * modular-SDK functions createBrowserKiosk() requires - the exact
+   * same shape already proven sufficient by
+   * kiosk/browser/createBrowserKiosk.test.js's Node-based fakes,
+   * re-implemented here so it runs inside a real browser JS engine
+   * instead of Node. `overrides` lets the negative-control test (B11)
+   * remove/break one required function to prove the harness can detect
+   * a real failure.
+   */
+  function createFakeFirebase(overrides) {
+    const calls = {
+      initializeApp: [],
+      getAuth: [],
+      getFunctions: [],
+      httpsCallable: [],
+      signInAnonymously: 0,
+      signOut: 0,
+    };
+    let uidCounter = 0;
+    let currentUser = null;
+    let listeners = [];
+
+    function emit() {
+      for (const listener of listeners.slice()) listener.next(currentUser);
+    }
+
+    const base = {
+      initializeApp(config) {
+        calls.initializeApp.push(config);
+        return { __fakeFirebaseApp: true, config };
+      },
+      getAuth(app) {
+        calls.getAuth.push(app);
+        return { __fakeAuthInstance: true, app };
+      },
+      getFunctions(app, region) {
+        calls.getFunctions.push({ app, region });
+        return { __fakeFunctionsInstance: true, app, region };
+      },
+      onAuthStateChanged(authArg, next, errorCb) {
+        const listener = { next, error: errorCb };
+        listeners.push(listener);
+        queueMicrotask(() => {
+          if (listeners.includes(listener)) listener.next(currentUser);
+        });
+        return () => {
+          listeners = listeners.filter((l) => l !== listener);
+        };
+      },
+      async signInAnonymously() {
+        calls.signInAnonymously += 1;
+        await Promise.resolve();
+        uidCounter += 1;
+        currentUser = { uid: "uid-" + uidCounter };
+        queueMicrotask(emit);
+        return { user: currentUser };
+      },
+      async signOut() {
+        calls.signOut += 1;
+        await Promise.resolve();
+        currentUser = null;
+        queueMicrotask(emit);
+      },
+      httpsCallable(functionsInstance, name) {
+        calls.httpsCallable.push({ functionsInstance, name });
+        const callable = async () => ({ data: { status: "REJECTED", reason: "TEST_STUB_NOT_USED" } });
+        return callable;
+      },
+    };
+
+    const merged = Object.assign({}, base, overrides);
+    return { firebase: merged, calls };
+  }
+
+  /**
+   * Attempts one deterministic createBrowserKiosk() construction and
+   * returns a plain, JSON-serializable summary (never functions/DOM
+   * nodes/circular refs) so Playwright's page.evaluate() can read it
+   * back directly. beginCustomerSession() is never called here.
+   */
+  function construct(overrides) {
+    const { firebase, calls } = createFakeFirebase(overrides);
+    let host;
+    try {
+      host = createBrowserKiosk({
+        firebaseConfig: { apiKey: "fake-key", projectId: "fake-project" },
+        firebase,
+      });
+    } catch (error) {
+      return { ok: false, error: { name: error.name, message: error.message } };
+    }
+
+    const snapshot = host.orchestrator.getSnapshot();
+    return {
+      ok: true,
+      hostKeys: Object.keys(host).sort(),
+      bootstrapStatus: host.getBootstrapStatus(),
+      snapshotReady: snapshot.ready,
+      snapshotHasOwnerUid: Object.keys(snapshot).some((key) => key.toLowerCase() === "owneruid"),
+      initializeAppCallCount: calls.initializeApp.length,
+      getAuthCallCount: calls.getAuth.length,
+      getFunctionsCallCount: calls.getFunctions.length,
+      httpsCallableCallCount: calls.httpsCallable.length,
+      signInAnonymouslyCallCount: calls.signInAnonymously,
+      signOutCallCount: calls.signOut,
+      authReceivedSameApp: !!(calls.getAuth[0] && calls.getAuth[0].__fakeFirebaseApp === true),
+      functionsReceivedSameApp: !!(calls.getFunctions[0] && calls.getFunctions[0].app && calls.getFunctions[0].app.__fakeFirebaseApp === true),
+      functionsRegion: calls.getFunctions[0] ? calls.getFunctions[0].region : null,
+      callableReceivedValidFunctionsInstance: !!(calls.httpsCallable[0] && calls.httpsCallable[0].functionsInstance && calls.httpsCallable[0].functionsInstance.__fakeFunctionsInstance === true),
+      callableName: calls.httpsCallable[0] ? calls.httpsCallable[0].name : null,
+    };
+  }
+
+  // The sole test-only global, confined entirely to this harness file.
+  window.__kioskTest = {
+    exportShape: Object.keys(kioskModule).sort(),
+    createBrowserKioskIsFunction: typeof createBrowserKiosk === "function",
+    construct,
+  };
+  window.__kioskModuleLoaded = true;
+</script>
+</body>
+</html>
