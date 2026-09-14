@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Kiosk Real Browser Composition Verification Harness (STEP 88) - TEST ONLY</title>
+</head>
+<body>
+<p id="status">INITIALIZING</p>
+<!--
+  Kiosk real browser composition verification harness (STEP 88).
+
+  TEST INFRASTRUCTURE ONLY - never part of production, never bundled
+  into kiosk/dist/createBrowserKiosk.js, never deployed. Unlike
+  kioskHarness.html (STEP 83, fully-fake Firebase deps), this harness
+  constructs the SAME real, unmodified generated artifact
+  (../dist/createBrowserKiosk.js) with REAL Firebase modular SDK
+  functions (initializeApp/getAuth/onAuthStateChanged/
+  signInAnonymously/signOut) connected to the REAL local Firebase Auth
+  Emulator, and a REAL test-scoped native IndexedDB store - exactly the
+  same createBrowserKiosk() composition root production uses, via the
+  same firebaseConfig/firebase/dbConfig dependency-injection seams it
+  already declared (STEP 80).
+
+  CONTROLLED BOUNDARY (per STEP 88 contract Section 6/16): getFunctions
+  and httpsCallable are deliberately NOT the real Firebase Functions SDK
+  - OrderIntent/Functions backend verification is explicitly out of
+  this step's scope. Both are local, in-page stubs that never perform
+  a network request; createBrowserKiosk() itself is never modified to
+  special-case this - it receives them through its existing
+  `firebase.getFunctions` / `firebase.httpsCallable` DI seam exactly as
+  it already requires.
+
+  This harness also separately imports the already-existing, real,
+  unmodified generated artifacts ../dist/indexedDbAdapter.js and
+  ../dist/persistenceAdapter.js (STEP 85's own build:persistence-test
+  output) so a test can seed/read the exact same real IndexedDB test
+  database createBrowserKiosk()'s internal store uses (via the same
+  dbConfig), proving hydrate() actually reads back real, independently
+  written IndexedDB content - not merely that it doesn't throw.
+
+  The raw Firebase App/Auth/User/Functions instances are captured only
+  in this module's own closures and NEVER placed on window.__step88 -
+  only plain, JSON-serializable primitives (a uid string, counts,
+  booleans) cross the page.evaluate() boundary to Playwright.
+-->
+<script type="module">
+  import { initializeApp } from
+    "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+
+  import {
+    getAuth,
+    connectAuthEmulator,
+    onAuthStateChanged,
+    signInAnonymously,
+    signOut
+  } from
+    "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+  import kioskModule from "../dist/createBrowserKiosk.js";
+  import indexedDbModule from "../dist/indexedDbAdapter.js";
+  import persistenceModule from "../dist/persistenceAdapter.js";
+
+  const { createBrowserKiosk } = kioskModule;
+  const { createIndexedDbStore } = indexedDbModule;
+  const { createPersistenceAdapter } = persistenceModule;
+
+  const status = document.getElementById("status");
+
+  const TEST_PROJECT_ID = "demo-no-project";
+  const AUTH_EMULATOR_URL = "http://127.0.0.1:9099";
+
+  /*
+   * STEP 88 production guard (mirrors STEP 87's authHarness.html):
+   * this harness contains its own synthetic emulator-only Firebase
+   * configuration. It does not read .firebaserc or production
+   * application configuration.
+   */
+  const firebaseConfig = Object.freeze({
+    apiKey: "demo-api-key",
+    authDomain: "demo-no-project.firebaseapp.com",
+    projectId: TEST_PROJECT_ID,
+    appId: "demo-app-id"
+  });
+
+  const testState = {
+    emulatorConnected: false,
+    emulatorUrl: AUTH_EMULATOR_URL,
+    projectId: TEST_PROJECT_ID,
+    signInCalls: 0,
+    signOutCalls: 0,
+    getFunctionsCalls: 0,
+    httpsCallableCalls: 0,
+    httpsCallableInvocations: 0
+  };
+
+  function failClosed(message) {
+    testState.failed = true;
+    testState.failure = message;
+    status.textContent = "FAILED: " + message;
+    throw new Error(message);
+  }
+
+  if (!kioskModule || typeof createBrowserKiosk !== "function") {
+    failClosed("createBrowserKiosk artifact export is unavailable");
+  }
+  if (!indexedDbModule || typeof createIndexedDbStore !== "function") {
+    failClosed("indexedDbAdapter artifact export is unavailable");
+  }
+  if (!persistenceModule || typeof createPersistenceAdapter !== "function") {
+    failClosed("persistenceAdapter artifact export is unavailable");
+  }
+
+  // Captured ONLY in this closure - never exposed on window.__step88.
+  // Constructed EAGERLY, at page load, before status ever reports READY -
+  // so a page that never calls construct() still proves (or fails
+  // closed on) the emulator connection, exactly like authHarness.html
+  // (STEP 87). The `firebase.initializeApp`/`firebase.getAuth` functions
+  // createBrowserKiosk() itself calls are thin DI wrappers that return
+  // these SAME already-constructed, already-emulator-connected
+  // instances - never a second real initializeApp()/getAuth() call.
+  const capturedApp = initializeApp(firebaseConfig);
+  const capturedAuth = getAuth(capturedApp);
+
+  /*
+   * REQUIRED STEP 88 boundary (same as STEP 87):
+   * connectAuthEmulator() happens before any Auth operation - including
+   * before createBrowserKiosk() is ever constructed.
+   */
+  try {
+    connectAuthEmulator(capturedAuth, AUTH_EMULATOR_URL, {
+      disableWarnings: true
+    });
+    testState.emulatorConnected = true;
+  } catch (error) {
+    failClosed("Firebase Auth Emulator connection failed");
+  }
+  if (!testState.emulatorConnected) {
+    failClosed("Production fallback is forbidden");
+  }
+
+  function capturingInitializeApp(_config) {
+    return capturedApp;
+  }
+  function capturingGetAuth(_appArg) {
+    return capturedAuth;
+  }
+
+  async function trackedSignIn(authInstance) {
+    testState.signInCalls += 1;
+    return signInAnonymously(authInstance);
+  }
+  async function trackedSignOut(authInstance) {
+    testState.signOutCalls += 1;
+    return signOut(authInstance);
+  }
+
+  /*
+   * CONTROLLED httpsCallable / OrderIntent seam (Section 6/16 of the
+   * STEP 88 contract): getFunctions/httpsCallable never perform a real
+   * network request and never contact production Functions. This is
+   * the ONLY controlled boundary in this harness - everything else
+   * (Firebase SDK/App/Auth/Auth Emulator/IndexedDB/createBrowserKiosk/
+   * Host/Runtime/Experience) is real.
+   */
+  function controlledGetFunctions(app, region) {
+    testState.getFunctionsCalls += 1;
+    return { __controlledFunctionsInstance: true, region };
+  }
+  function controlledHttpsCallable(functionsInstance, name) {
+    testState.httpsCallableCalls += 1;
+    testState.httpsCallableName = name;
+    return async function controlledCallable() {
+      testState.httpsCallableInvocations += 1;
+      return { data: { status: "REJECTED", reason: "STEP88_CONTROLLED_SEAM_NEVER_INVOKED" } };
+    };
+  }
+
+  let currentHost = null;
+
+  function construct(dbConfig) {
+    currentHost = createBrowserKiosk({
+      firebaseConfig,
+      firebase: {
+        initializeApp: capturingInitializeApp,
+        getAuth: capturingGetAuth,
+        getFunctions: controlledGetFunctions,
+        onAuthStateChanged,
+        signInAnonymously: trackedSignIn,
+        signOut: trackedSignOut,
+        httpsCallable: controlledHttpsCallable
+      },
+      dbConfig
+    });
+
+    const snapshot = currentHost.orchestrator.getSnapshot();
+    return {
+      hostKeys: Object.keys(currentHost).sort(),
+      bootstrapStatus: currentHost.getBootstrapStatus(),
+      snapshotReady: snapshot.ready
+    };
+  }
+
+  async function beginCustomerSession(expiryOptions) {
+    if (!currentHost) failClosed("beginCustomerSession called before construct()");
+    const result = await currentHost.beginCustomerSession(expiryOptions);
+    const snapshot = currentHost.orchestrator.getSnapshot();
+    const user = capturedAuth ? capturedAuth.currentUser : null;
+    const resolvedUid = user ? user.uid : null;
+    return {
+      result,
+      bootstrapStatus: currentHost.getBootstrapStatus(),
+      snapshot,
+      resolvedUid,
+      resolvedUidType: typeof resolvedUid
+    };
+  }
+
+  function getSnapshot() {
+    if (!currentHost) failClosed("getSnapshot called before construct()");
+    return currentHost.orchestrator.getSnapshot();
+  }
+
+  function getBootstrapStatus() {
+    if (!currentHost) failClosed("getBootstrapStatus called before construct()");
+    return currentHost.getBootstrapStatus();
+  }
+
+  // Independent real-IndexedDB seam (separate module instances of the
+  // same real, unmodified STEP 85 artifacts) - used ONLY to prove
+  // hydrate() reads back real, independently-written content, and to
+  // clean up the STEP 88 test database. Never routes through Host/
+  // Runtime/Auth - this is a direct persistence-layer read/write, the
+  // same technique persistenceHarness.html (STEP 85) already uses.
+  function directAdapter(dbConfig) {
+    const store = createIndexedDbStore(dbConfig);
+    return createPersistenceAdapter(store);
+  }
+
+  async function seedCartDraft(dbConfig, ownerUid, cartDraft) {
+    const adapter = directAdapter(dbConfig);
+    const result = await adapter.saveCartDraft(ownerUid, cartDraft);
+    return JSON.parse(JSON.stringify(result));
+  }
+
+  async function directLoad(dbConfig, ownerUid) {
+    const adapter = directAdapter(dbConfig);
+    const result = await adapter.load(ownerUid);
+    return JSON.parse(JSON.stringify(result));
+  }
+
+  function deleteDatabase(dbName) {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(dbName);
+      request.onsuccess = () => resolve({ ok: true, blocked: false });
+      request.onerror = () => reject(request.error);
+      request.onblocked = () => resolve({ ok: true, blocked: true });
+    });
+  }
+
+  window.__step88 = Object.freeze({
+    testState,
+    firebaseConfig: Object.freeze({ ...firebaseConfig }),
+    construct,
+    beginCustomerSession,
+    getSnapshot,
+    getBootstrapStatus,
+    seedCartDraft,
+    directLoad,
+    deleteDatabase
+  });
+  window.__step88Loaded = true;
+
+  status.textContent = "READY";
+</script>
+</body>
+</html>

@@ -42,7 +42,7 @@ module.exports = defineConfig({
       use: {
         ...devices["Desktop Chrome"],
         launchOptions: {
-          executablePath: "/opt/pw-browsers/chromium",
+          executablePath: require("playwright").chromium.executablePath(),
         },
       },
     },
