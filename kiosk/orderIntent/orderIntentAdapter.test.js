@@ -273,6 +273,80 @@ test("D15. rejection does not generate a new key", async () => {
   assert.equal(result.attempt.idempotencyKey, "abcdefgh12345678");
 });
 
+// ------------------------------------------------------------
+// STEP90 - real SDK-shaped ("functions/"-prefixed) error codes,
+// discovered against the real Functions Emulator in STEP89.
+// ------------------------------------------------------------
+
+test("D16. STEP90: real SDK-shaped 'functions/failed-precondition' -> REJECTED", async () => {
+  const persistence = createFakePersistence();
+  const callable = createSpyCallable(async () => {
+    throw { code: "functions/failed-precondition", message: "Insufficient stock.", details: { code: "INSUFFICIENT_STOCK" } };
+  });
+  const result = await submitNewAttempt(
+    { ...validParams(), persistence, callOrderIntent: callable },
+    fixedKeyDeps("abcdefgh12345678")
+  );
+  assert.equal(result.outcome, "REJECTED");
+  assert.equal(result.category, "VALIDATION_REJECTION");
+  assert.equal(result.reason, "INSUFFICIENT_STOCK");
+});
+
+test("D17. STEP90: real SDK-shaped 'functions/unauthenticated' -> REJECTED", async () => {
+  const persistence = createFakePersistence();
+  const callable = createSpyCallable(async () => {
+    throw { code: "functions/unauthenticated", message: "Sign-in is required." };
+  });
+  const result = await submitNewAttempt(
+    { ...validParams(), persistence, callOrderIntent: callable },
+    fixedKeyDeps("abcdefgh12345678")
+  );
+  assert.equal(result.outcome, "REJECTED");
+  assert.equal(result.category, "AUTH_REJECTION");
+  assert.equal(result.reason, "AUTH_REQUIRED");
+});
+
+test("D18. STEP90: real SDK-shaped 'functions/invalid-argument' -> REJECTED", async () => {
+  const persistence = createFakePersistence();
+  const callable = createSpyCallable(async () => {
+    throw { code: "functions/invalid-argument", message: "A valid idempotencyKey is required." };
+  });
+  const result = await submitNewAttempt(
+    { ...validParams(), persistence, callOrderIntent: callable },
+    fixedKeyDeps("abcdefgh12345678")
+  );
+  assert.equal(result.outcome, "REJECTED");
+  assert.equal(result.category, "VALIDATION_REJECTION");
+  assert.equal(result.reason, "INVALID_REQUEST_SHAPE");
+});
+
+test("D19. STEP90: bare (unprefixed) codes remain supported after normalization", async () => {
+  const persistence = createFakePersistence();
+  const callable = createSpyCallable(async () => {
+    throw { code: "unauthenticated" };
+  });
+  const result = await submitNewAttempt(
+    { ...validParams(), persistence, callOrderIntent: callable },
+    fixedKeyDeps("abcdefgh12345678")
+  );
+  assert.equal(result.outcome, "REJECTED");
+  assert.equal(result.category, "AUTH_REJECTION");
+});
+
+test("D20. STEP90: no path from a prefixed error code ever produces a false SUCCEEDED", async () => {
+  const persistence = createFakePersistence();
+  for (const code of ["functions/failed-precondition", "functions/unauthenticated", "functions/invalid-argument"]) {
+    const callable = createSpyCallable(async () => {
+      throw { code, details: { code: "INSUFFICIENT_STOCK" } };
+    });
+    const result = await submitNewAttempt(
+      { ...validParams(), persistence, callOrderIntent: callable },
+      fixedKeyDeps("abcdefgh12345678")
+    );
+    assert.notEqual(result.outcome, "SUCCEEDED");
+  }
+});
+
 // ============================================================
 // E. UNKNOWN
 // ============================================================
@@ -340,6 +414,38 @@ test("E21. UNKNOWN never creates a new key", async () => {
   });
   await submitNewAttempt({ ...validParams(), persistence, callOrderIntent: callable }, deps);
   assert.equal(generateCalls, 1);
+});
+
+// ------------------------------------------------------------
+// STEP90 - normalization must NOT widen the allowlist: prefixed
+// codes that were never provably no-commit still stay UNKNOWN.
+// ------------------------------------------------------------
+
+test("E22. STEP90: 'functions/internal' (prefixed) still cannot be classified REJECTED", async () => {
+  const persistence = createFakePersistence();
+  const callable = createSpyCallable(async () => {
+    throw { code: "functions/internal", message: "We couldn't process that order right now. Please try again." };
+  });
+  const result = await submitNewAttempt(
+    { ...validParams(), persistence, callOrderIntent: callable },
+    fixedKeyDeps("abcdefgh12345678")
+  );
+  assert.notEqual(result.outcome, "REJECTED");
+  assert.equal(result.outcome, "UNKNOWN");
+  assert.equal(result.category, "INTERNAL_UNKNOWN");
+});
+
+test("E23. STEP90: 'functions/unavailable' (prefixed, unrecognized) still falls back to UNKNOWN", async () => {
+  const persistence = createFakePersistence();
+  const callable = createSpyCallable(async () => {
+    throw { code: "functions/unavailable" };
+  });
+  const result = await submitNewAttempt(
+    { ...validParams(), persistence, callOrderIntent: callable },
+    fixedKeyDeps("abcdefgh12345678")
+  );
+  assert.equal(result.outcome, "UNKNOWN");
+  assert.equal(result.category, "TRANSPORT_UNKNOWN");
 });
 
 // ============================================================

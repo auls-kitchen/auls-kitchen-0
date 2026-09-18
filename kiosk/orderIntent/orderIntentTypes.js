@@ -157,7 +157,19 @@ function buildOrderIntentRequestPayload(attempt) {
  * fabricated backend data.
  */
 function classifyCallableError(err) {
-  const code = err && typeof err.code === "string" ? err.code : null;
+  const rawCode = err && typeof err.code === "string" ? err.code : null;
+
+  // The real Firebase Functions client SDK prefixes every error code with
+  // "functions/" (e.g. "functions/failed-precondition"), while the backend's
+  // own HttpsError codes (and every existing bare-code test fixture in this
+  // repo) are unprefixed. Normalize once, here, so both forms are treated
+  // identically by every comparison below - discovered against the real
+  // Functions Emulator in STEP89, fixed in STEP90.
+  const FUNCTIONS_CODE_PREFIX = "functions/";
+  const code =
+    rawCode && rawCode.startsWith(FUNCTIONS_CODE_PREFIX)
+      ? rawCode.slice(FUNCTIONS_CODE_PREFIX.length)
+      : rawCode;
 
   if (code && PROVEN_NO_COMMIT_ERROR_CODES.includes(code)) {
     if (code === "unauthenticated") {

@@ -124,7 +124,7 @@ test.describe("STEP 89 - Real Functions Emulator OrderIntent verification", () =
     expect(stockAfter).toBe(stockBefore - RECIPE_QTY_PER_UNIT);
   });
 
-  test("D3. real insufficient-stock rejection performs zero writes; documents a discovered classification defect (all-or-nothing)", async ({ page }) => {
+  test("D3. real insufficient-stock rejection performs zero writes; STEP90 confirms the corrected REJECTED classification (all-or-nothing)", async ({ page }) => {
     await page.goto("/browser-test/orderIntentHarness.html");
     await expect(page.locator("#status")).toHaveText("READY");
 
@@ -138,21 +138,19 @@ test.describe("STEP 89 - Real Functions Emulator OrderIntent verification", () =
       return r;
     }, SHORTAGE_PRODUCT_ID);
 
-    // KNOWN DEFECT (discovered by this REAL emulator run, documented not
-    // fixed - see STEP89 checkpoint): the real Firebase Functions client
-    // SDK returns err.code prefixed as "functions/failed-precondition",
-    // but kiosk/orderIntent/orderIntentTypes.js's classifyCallableError /
-    // PROVEN_NO_COMMIT_ERROR_CODES only matches the bare, unprefixed
-    // code. Against the REAL backend this never matches, so the outcome
-    // falls through to the conservative UNKNOWN branch instead of the
-    // REJECTED branch the design intends. This is SAFE (UNKNOWN never
-    // fabricates a false success) but means REJECTED is currently
-    // unreachable for real callable errors. orderIntentTypes.js is a
-    // locked file for this scope and was intentionally NOT modified.
+    // STEP89 discovered that the real Firebase Functions client SDK
+    // returns err.code prefixed as "functions/failed-precondition", which
+    // kiosk/orderIntent/orderIntentTypes.js's classifyCallableError did
+    // not match (bare-code-only allowlist), falling through to UNKNOWN.
+    // STEP90 fixed this with a normalization step in classifyCallableError
+    // (strips a leading "functions/" before the existing comparisons).
+    // This now confirms the corrected, originally-intended behavior
+    // against the REAL Functions Emulator.
     expect(result.__rawError.code).toBe("functions/failed-precondition");
     expect(result.__rawError.details).toEqual({ code: "INSUFFICIENT_STOCK" });
-    expect(result.outcome).toBe("UNKNOWN");
-    expect(result.category).toBe("TRANSPORT_UNKNOWN");
+    expect(result.outcome).toBe("REJECTED");
+    expect(result.category).toBe("VALIDATION_REJECTION");
+    expect(result.reason).toBe("INSUFFICIENT_STOCK");
 
     // Regardless of classification, the real transaction itself remains
     // correctly all-or-nothing: an aborted Firestore transaction performs
@@ -161,7 +159,7 @@ test.describe("STEP 89 - Real Functions Emulator OrderIntent verification", () =
     expect(stockAfter).toBe(stockBefore);
   });
 
-  test("D4. unauthenticated call against the real emulator is rejected by authGuard; documents the same discovered classification defect", async ({ page }) => {
+  test("D4. unauthenticated call against the real emulator is rejected by authGuard; STEP90 confirms the corrected REJECTED classification", async ({ page }) => {
     await page.goto("/browser-test/orderIntentHarness.html");
     await expect(page.locator("#status")).toHaveText("READY");
 
@@ -172,14 +170,14 @@ test.describe("STEP 89 - Real Functions Emulator OrderIntent verification", () =
       return r;
     }, OK_PRODUCT_ID);
 
-    // Same discovered defect as D3: authGuard.js genuinely rejects the
+    // Same STEP89->STEP90 fix as D3: authGuard.js genuinely rejects the
     // unauthenticated call (proven by the raw "functions/unauthenticated"
-    // code below), but the adapter's bare-code match again falls through
-    // to UNKNOWN rather than REJECTED/AUTH_REJECTION. Documented, not
-    // fixed, per this scope's locked-files boundary.
+    // code below), and the normalized classifier now correctly reports
+    // REJECTED/AUTH_REJECTION instead of the pre-fix UNKNOWN.
     expect(result.__rawError.code).toBe("functions/unauthenticated");
-    expect(result.outcome).toBe("UNKNOWN");
-    expect(result.category).toBe("TRANSPORT_UNKNOWN");
+    expect(result.outcome).toBe("REJECTED");
+    expect(result.category).toBe("AUTH_REJECTION");
+    expect(result.reason).toBe("AUTH_REQUIRED");
   });
 
   test("D5. production guard - harness and built artifact never reference the real project id", async ({ page }) => {
