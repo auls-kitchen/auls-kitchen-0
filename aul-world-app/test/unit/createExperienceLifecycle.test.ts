@@ -1,0 +1,654 @@
+// U2 targeted tests for src/experience/createExperienceLifecycle.ts.
+// Brief section 16: A (timing), B (input reset), C (timer safety), D (cart
+// preserved), E (UNKNOWN preserved), F (habitat return), G (no fake input),
+// H (lifecycle), plus section 14 (Domain events during Habitat).
+//
+// The Domain tests drive the REAL, unmodified Kiosk Host/Runtime/Experience
+// (kiosk/host/kioskHost.js) with in-memory fakes. The lifecycle is given ONLY
+// a read-only getSnapshot port over it - the same narrow port production will
+// use - and every Domain-side effect a timer could have (cart, session,
+// submission, persistence, auth, callable) is measured before and after.
+
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import { createExperienceLifecycle } from "../../src/experience/createExperienceLifecycle.ts";
+import type { ExperienceLifecycleOptions } from "../../src/experience/createExperienceLifecycle.ts";
+import type { InteractionPhase } from "../../src/experience/interactionContext.ts";
+import type { WakeDecision } from "../../src/experience/pendingTicket.ts";
+import { createMonotonicClock, createTimeoutScheduler } from "../../src/experience/silenceTimer.ts";
+import type { ExperienceSnapshotView, SnapshotReadPort } from "../../src/contracts.ts";
+import { createFakeInputTarget, makeEvent, synthetic, trusted } from "./support/fakeInputTarget.ts";
+import { createFakeTime } from "./support/fakeTime.ts";
+import {
+  ITEM,
+  createDeferredCallable,
+  createKioskHostFixture,
+  succeedingCallable,
+  unknownCallable,
+} from "./support/realKioskFixture.ts";
+
+const IDLE_READY: ExperienceSnapshotView = Object.freeze({
+  ready: true,
+  session: "idle",
+  cart: Object.freeze({ lines: Object.freeze([]) }),
+  order: Object.freeze({ status: "NONE" }),
+  degraded: null,
+});
+
+interface HarnessOptions {
+  readonly snapshots?: SnapshotReadPort;
+  readonly ordering?: boolean;
+  readonly thresholds?: ExperienceLifecycleOptions["thresholds"];
+}
+
+function harness(options: HarnessOptions = {}) {
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  const phases: InteractionPhase[] = [];
+  const wakes: WakeDecision[] = [];
+  const errors: unknown[] = [];
+  const calls = { getSnapshot: 0, returnToWorld: 0 };
+  const world = { ordering: options.ordering ?? false };
+
+  const source: SnapshotReadPort = options.snapshots ?? { getSnapshot: () => IDLE_READY };
+  const lifecycle = createExperienceLifecycle({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    inputTarget: input.target,
+    snapshots: {
+      getSnapshot: () => {
+        calls.getSnapshot += 1;
+        return source.getSnapshot();
+      },
+    },
+    presentation: {
+      returnToWorld: () => {
+        calls.returnToWorld += 1;
+      },
+    },
+    world: { isOrdering: () => world.ordering },
+    thresholds: options.thresholds,
+    onPhase: (phase) => phases.push(phase),
+    onWake: (decision) => wakes.push(decision),
+    onError: (error) => errors.push(error),
+  });
+  lifecycle.start();
+  return { time, input, lifecycle, phases, wakes, errors, calls, world };
+}
+
+// ============================================================
+// A. Experience timing (through the whole lifecycle)
+// ============================================================
+
+test("L1. boot HABITAT_IDLE; input -> ACTIVE_STANDBY; 15s SPACE_GIVEN; 25s RELEASED; 5min HABITAT_IDLE", () => {
+  const { time, input, lifecycle, phases } = harness();
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+  assert.deepEqual(phases, [], "boot is a resting state, not a transition");
+
+  input.dispatch(trusted.tap());
+  assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY");
+
+  time.advanceBy(15_000);
+  assert.equal(lifecycle.getPhase(), "SPACE_GIVEN");
+  time.advanceBy(10_000);
+  assert.equal(lifecycle.getPhase(), "RELEASED");
+  time.advanceBy(275_000);
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+
+  assert.deepEqual(phases, ["ACTIVE_STANDBY", "SPACE_GIVEN", "RELEASED", "CONTEXT_EXPIRED", "HABITAT_IDLE"]);
+});
+
+// ============================================================
+// B. Input reset
+// ============================================================
+
+test("L2. each kind of trusted customer input restarts the silence window", () => {
+  const inputs = [trusted.tap, trusted.drag, trusted.touchSwipe, trusted.wheel, trusted.enterOnButton];
+  for (const makeInput of inputs) {
+    const { time, input, lifecycle } = harness();
+    input.dispatch(trusted.tap());
+    time.advanceBy(20_000);
+    assert.equal(lifecycle.getPhase(), "SPACE_GIVEN");
+
+    input.dispatch(makeInput());
+    assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY");
+    time.advanceBy(14_999);
+    assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY");
+    time.advanceBy(1);
+    assert.equal(lifecycle.getPhase(), "SPACE_GIVEN");
+  }
+});
+
+test("L3. input during RELEASED, and just before 5min, prevents Habitat", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  time.advanceBy(299_999);
+  assert.equal(lifecycle.getPhase(), "RELEASED");
+  input.dispatch(trusted.tap());
+  time.advanceBy(1);
+  assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY");
+});
+
+// ============================================================
+// G. No fake input / timer never wakes
+// ============================================================
+
+test("L4. the timer never wakes HABITAT_IDLE: an hour of silence and every possible callback changes nothing", () => {
+  const { time, input, lifecycle, phases, calls } = harness();
+  input.dispatch(trusted.tap());
+  time.advanceBy(300_000);
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+  const phaseCount = phases.length;
+  const snapshotReads = calls.getSnapshot;
+
+  time.advanceBy(3_600_000);
+  time.fireDue();
+  time.fireStale();
+
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+  assert.equal(phases.length, phaseCount);
+  assert.equal(calls.getSnapshot, snapshotReads, "no snapshot is read without customer input");
+  assert.equal(time.pendingCount(), 0);
+  assert.equal(phases.filter((p) => p === "ACTIVE_STANDBY").length, 1, "only the one real customer wake");
+});
+
+test("L5. synthetic events, hover, scroll and non-interaction events never wake Habitat or read the Domain", () => {
+  const { input, lifecycle, phases, calls, wakes } = harness();
+  input.dispatch(synthetic.tap());
+  input.dispatch(synthetic.wheel());
+  input.dispatch(synthetic.enterOnButton());
+  input.dispatch(trusted.hover());
+  input.dispatch(makeEvent("scroll"));
+  input.dispatch(makeEvent("pointerup"));
+  input.dispatch(makeEvent("TICK"));
+  input.dispatch(makeEvent("resize"));
+
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+  assert.deepEqual(phases, []);
+  assert.deepEqual(wakes, []);
+  assert.equal(calls.getSnapshot, 0);
+});
+
+test("L6. synthetic events never reset an active silence window", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  time.advanceBy(14_000);
+  input.dispatch(synthetic.tap());
+  input.dispatch(synthetic.wheel());
+  input.dispatch(trusted.hover());
+  time.advanceBy(1_000);
+  assert.equal(lifecycle.getPhase(), "SPACE_GIVEN", "the window was NOT restarted by non-customer activity");
+});
+
+// ============================================================
+// F. Habitat return
+// ============================================================
+
+test("L7. waking from Habitat reads exactly ONE snapshot; resets while active read none", () => {
+  const { time, input, calls, wakes } = harness();
+  input.dispatch(trusted.tap());
+  assert.equal(calls.getSnapshot, 1);
+  assert.equal(wakes.length, 1);
+
+  input.dispatch(trusted.tap());
+  input.dispatch(trusted.drag());
+  time.advanceBy(20_000);
+  input.dispatch(trusted.tap());
+  assert.equal(calls.getSnapshot, 1, "input while already awake never re-reads the Domain");
+  assert.equal(wakes.length, 1);
+
+  time.advanceBy(300_000); // Habitat again
+  input.dispatch(trusted.tap());
+  assert.equal(calls.getSnapshot, 2);
+  assert.equal(wakes.length, 2);
+});
+
+test("L8. the wake decision follows the snapshot read at that moment (not a cached one)", () => {
+  let current: ExperienceSnapshotView = IDLE_READY;
+  const { time, input, wakes } = harness({ snapshots: { getSnapshot: () => current } });
+
+  input.dispatch(trusted.tap());
+  assert.deepEqual({ ...wakes[0]! }, { route: "DISCOVER_MENU", pending: "NONE" });
+
+  time.advanceBy(300_000);
+  current = { ready: true, session: "confirmation", cart: { lines: [{}] }, order: { status: "CONFIRMED" }, degraded: null };
+  input.dispatch(trusted.tap());
+  assert.deepEqual({ ...wakes[1]! }, { route: "OWNERSHIP_CONFIRMATION", pending: "CONFIRMATION" });
+
+  time.advanceBy(300_000);
+  current = { ready: false, session: "idle", cart: { lines: [] }, order: { status: "NONE" }, degraded: null };
+  input.dispatch(trusted.tap());
+  assert.deepEqual({ ...wakes[2]! }, { route: "WAIT_NOT_READY", pending: "NOT_READY" });
+});
+
+test("L9. a snapshot read that throws fails closed to WAIT_NOT_READY and never throws into the DOM event", () => {
+  const { input, wakes, errors, lifecycle } = harness({
+    snapshots: {
+      getSnapshot: () => {
+        throw new Error("domain unreadable");
+      },
+    },
+  });
+  assert.doesNotThrow(() => input.dispatch(trusted.tap()));
+  assert.deepEqual({ ...wakes[0]! }, { route: "WAIT_NOT_READY", pending: "NOT_READY" });
+  assert.equal(errors.length, 1);
+  assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY");
+});
+
+// ============================================================
+// Habitat entry (approved decision: returnToWorld only when ORDERING)
+// ============================================================
+
+test("L10. entering Habitat calls returnToWorld exactly once when AWR is in ORDERING", () => {
+  const { time, input, calls } = harness({ ordering: true });
+  input.dispatch(trusted.tap());
+  time.advanceBy(15_000);
+  time.advanceBy(10_000);
+  assert.equal(calls.returnToWorld, 0, "15s and 25s are Experience-only: no AWR effect");
+  time.advanceBy(275_000);
+  assert.equal(calls.returnToWorld, 1);
+  time.advanceBy(3_600_000);
+  assert.equal(calls.returnToWorld, 1, "and never again while idle");
+});
+
+test("L11. entering Habitat does NOT call returnToWorld when AWR is not in ORDERING", () => {
+  const { time, input, calls } = harness({ ordering: false });
+  input.dispatch(trusted.tap());
+  time.advanceBy(300_000);
+  assert.equal(calls.returnToWorld, 0);
+});
+
+test("L12. returnToWorld is not called by a wake, and the ORDERING probe is read at Habitat entry", () => {
+  const { time, input, calls, world } = harness({ ordering: false });
+  input.dispatch(trusted.tap());
+  world.ordering = true; // the customer entered ordering while active
+  time.advanceBy(300_000);
+  assert.equal(calls.returnToWorld, 1);
+
+  input.dispatch(trusted.tap()); // wake
+  assert.equal(calls.returnToWorld, 1, "waking never emits a world transition");
+});
+
+test("L13. failures in presentation, the ORDERING probe, or callbacks are isolated and reported", () => {
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  const errors: unknown[] = [];
+  const lifecycle = createExperienceLifecycle({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    inputTarget: input.target,
+    snapshots: { getSnapshot: () => IDLE_READY },
+    presentation: {
+      returnToWorld: () => {
+        throw new Error("presentation failed");
+      },
+    },
+    world: { isOrdering: () => true },
+    onPhase: () => {
+      throw new Error("phase callback failed");
+    },
+    onWake: () => {
+      throw new Error("wake callback failed");
+    },
+    onError: (e) => errors.push(e),
+  });
+  lifecycle.start();
+
+  assert.doesNotThrow(() => input.dispatch(trusted.tap()));
+  // First wake: onPhase(ACTIVE_STANDBY) throws + onWake throws.
+  assert.equal(errors.length, 2);
+  time.advanceBy(300_000);
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE", "the lifecycle still completed the timeline");
+  // Then onPhase throws for SPACE_GIVEN, RELEASED, CONTEXT_EXPIRED, HABITAT_IDLE
+  // (4) and returnToWorld throws once at Habitat entry (1): 2 + 4 + 1.
+  assert.equal(errors.length, 7);
+  input.dispatch(trusted.tap());
+  assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY", "and it still wakes afterwards");
+});
+
+// ============================================================
+// C. Timer safety - structural surface
+// ============================================================
+
+test("L14. the lifecycle's whole reach is its three narrow ports: nothing else is ever touched", () => {
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  const guard = <T extends object>(name: string, allowed: string[], target: T): T =>
+    new Proxy(target, {
+      get(t, property, receiver) {
+        if (typeof property === "string" && !allowed.includes(property)) {
+          throw new Error(`${name}.${property} was accessed; only ${allowed.join(", ")} is allowed`);
+        }
+        return Reflect.get(t, property, receiver);
+      },
+    });
+
+  const lifecycle = createExperienceLifecycle({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    inputTarget: input.target,
+    snapshots: guard("snapshots", ["getSnapshot"], { getSnapshot: () => IDLE_READY }),
+    presentation: guard("presentation", ["returnToWorld"], { returnToWorld: () => {} }),
+    world: guard("world", ["isOrdering"], { isOrdering: () => true }),
+  });
+  lifecycle.start();
+
+  // A full customer cycle: wake, silence to Habitat, wake again, dispose.
+  input.dispatch(trusted.tap());
+  time.advanceBy(300_000);
+  input.dispatch(trusted.tap());
+  time.advanceBy(300_000);
+  lifecycle.dispose();
+});
+
+test("L15. the returned object exposes only start / dispose / getPhase (no input sink, no timer)", () => {
+  const { lifecycle } = harness();
+  assert.deepEqual(Object.keys(lifecycle).sort(), ["dispose", "getPhase", "start"]);
+  assert.ok(Object.isFrozen(lifecycle));
+  assert.equal("noteCustomerInput" in lifecycle, false);
+});
+
+test("L16. methods work when detached from the object (no reliance on `this`)", () => {
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  const { start, dispose, getPhase } = createExperienceLifecycle({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    inputTarget: input.target,
+    snapshots: { getSnapshot: () => IDLE_READY },
+    presentation: { returnToWorld: () => {} },
+    world: { isOrdering: () => false },
+  });
+  start();
+  input.dispatch(trusted.tap());
+  assert.equal(getPhase(), "ACTIVE_STANDBY");
+  dispose();
+  assert.equal(input.activeListenerCount(), 0);
+});
+
+// ============================================================
+// D / E. The Domain is untouched by 15s, 25s, 5min, Habitat and wake
+// ============================================================
+
+type DomainKind = "active_cart" | "confirmation" | "unknown";
+
+async function buildDomain(kind: DomainKind) {
+  const fixture = createKioskHostFixture(kind === "confirmation" ? succeedingCallable() : unknownCallable());
+  await fixture.host.beginCustomerSession();
+  fixture.orchestrator.addItem(ITEM);
+  if (kind !== "active_cart") await fixture.orchestrator.submit();
+  return fixture;
+}
+
+function measureDomain(fixture: Awaited<ReturnType<typeof buildDomain>>) {
+  return {
+    snapshot: fixture.orchestrator.getSnapshot(),
+    store: JSON.stringify([...fixture.store.entries()]),
+    orderIntentCalls: fixture.calls.orderIntent(),
+    resolveOwnerUidCalls: fixture.calls.resolveOwnerUid(),
+    requestAuthResetCalls: fixture.calls.requestAuthReset(),
+  };
+}
+
+const EXPECTED_PENDING: Record<DomainKind, { session: string; pending: string; order: string }> = {
+  active_cart: { session: "active", pending: "ACTIVE_CART", order: "NONE" },
+  confirmation: { session: "confirmation", pending: "CONFIRMATION", order: "CONFIRMED" },
+  unknown: { session: "awaiting_outcome", pending: "UNRESOLVED", order: "UNCERTAIN" },
+};
+
+for (const kind of ["active_cart", "confirmation", "unknown"] as const) {
+  test(`D/E. ${kind}: 15s, 25s, 5min, Habitat and wake leave the real Domain completely untouched`, async () => {
+    const fixture = await buildDomain(kind);
+    const domainEvents: unknown[] = [];
+    fixture.orchestrator.subscribe((event) => domainEvents.push(event));
+
+    const expected = EXPECTED_PENDING[kind];
+    const before = measureDomain(fixture);
+    assert.equal(before.snapshot.session, expected.session);
+    assert.equal(before.snapshot.order.status, expected.order);
+    assert.equal(before.snapshot.cart.lines.length, 1);
+
+    const { time, input, lifecycle, wakes, calls } = harness({
+      snapshots: { getSnapshot: () => fixture.orchestrator.getSnapshot() },
+      ordering: true,
+    });
+
+    // The customer interacts, then goes silent through every threshold.
+    input.dispatch(trusted.tap());
+    assert.deepEqual({ ...wakes[0]! }, { route: "OWNERSHIP_CONFIRMATION", pending: expected.pending });
+    time.advanceBy(15_000);
+    assert.equal(lifecycle.getPhase(), "SPACE_GIVEN");
+    assert.deepEqual(measureDomain(fixture), before, "Domain changed at 15s");
+    time.advanceBy(10_000);
+    assert.equal(lifecycle.getPhase(), "RELEASED");
+    assert.deepEqual(measureDomain(fixture), before, "Domain changed at 25s");
+    time.advanceBy(275_000);
+    assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+    assert.equal(calls.returnToWorld, 1);
+
+    // 5min expiry: nothing cleared, ended, retried, hydrated, rotated or purged.
+    const after = measureDomain(fixture);
+    assert.deepEqual(after.snapshot, before.snapshot, "snapshot changed at 5min");
+    assert.equal(after.store, before.store, "persistence changed at 5min");
+    assert.equal(after.orderIntentCalls, before.orderIntentCalls, "OrderIntent was called (retry)");
+    assert.equal(after.resolveOwnerUidCalls, before.resolveOwnerUidCalls, "identity was re-resolved (hydrate)");
+    assert.equal(after.requestAuthResetCalls, 0, "auth was reset / UID rotated");
+    assert.equal(domainEvents.length, 0, "the Domain emitted an event (session end, outcome change, ...)");
+    assert.equal(after.snapshot.session, expected.session);
+    assert.equal(after.snapshot.cart.lines.length, 1);
+
+    // Habitat return: a customer comes back; only the snapshot is read.
+    input.dispatch(trusted.tap());
+    assert.deepEqual({ ...wakes[1]! }, { route: "OWNERSHIP_CONFIRMATION", pending: expected.pending });
+    assert.deepEqual(measureDomain(fixture), before, "Domain changed on wake");
+    assert.equal(domainEvents.length, 0);
+
+    if (kind === "unknown") {
+      assert.equal(after.snapshot.capabilities.canRetryUnknown, true, "UNKNOWN is still recoverable by the Domain, not by us");
+      assert.equal(fixture.calls.orderIntent(), 1, "exactly the original submit; no retry");
+    }
+    lifecycle.dispose();
+  });
+}
+
+test("Domain events during Habitat: an in-flight order settles while the kiosk is in Habitat and the lifecycle neither reacts nor fabricates", async () => {
+  const deferred = createDeferredCallable();
+  const fixture = createKioskHostFixture(deferred.callable);
+  await fixture.host.beginCustomerSession();
+  fixture.orchestrator.addItem(ITEM);
+  const domainEvents: Array<{ type: string }> = [];
+  fixture.orchestrator.subscribe((event) => domainEvents.push(event as { type: string }));
+
+  const pendingSubmit = fixture.orchestrator.submit();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(deferred.started(), true);
+  assert.equal(fixture.orchestrator.getSnapshot().session, "awaiting_outcome");
+
+  const { time, input, lifecycle, phases, wakes, calls } = harness({
+    snapshots: { getSnapshot: () => fixture.orchestrator.getSnapshot() },
+    ordering: true,
+  });
+  input.dispatch(trusted.tap());
+  assert.deepEqual({ ...wakes[0]! }, { route: "OWNERSHIP_CONFIRMATION", pending: "UNRESOLVED" });
+
+  time.advanceBy(300_000);
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+  assert.equal(fixture.orchestrator.getSnapshot().session, "awaiting_outcome", "elapsed time does not resolve ambiguity");
+  assert.equal(fixture.calls.requestAuthReset(), 0);
+
+  // The backend answers while nobody is at the kiosk.
+  const phasesBefore = phases.length;
+  const readsBefore = calls.getSnapshot;
+  deferred.release();
+  await pendingSubmit;
+
+  const settled = fixture.orchestrator.getSnapshot();
+  assert.equal(settled.session, "confirmation");
+  assert.equal(settled.order.status, "CONFIRMED");
+  assert.ok(domainEvents.some((e) => e.type === "ORDER_OUTCOME_CHANGED"));
+
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE", "a Domain event is not customer input and does not wake Habitat");
+  assert.equal(phases.length, phasesBefore);
+  assert.equal(calls.getSnapshot, readsBefore, "the lifecycle does not read the Domain on Domain events");
+
+  // The customer returns and sees the real, settled state.
+  input.dispatch(trusted.tap());
+  assert.deepEqual({ ...wakes[1]! }, { route: "OWNERSHIP_CONFIRMATION", pending: "CONFIRMATION" });
+  lifecycle.dispose();
+});
+
+// ============================================================
+// H. Lifecycle / disposal / re-initialization
+// ============================================================
+
+test("H1. repeated mount -> run -> dispose -> mount leaves no duplicate or leaked listener, timer, or callback", () => {
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  const perInstance: InteractionPhase[][] = [];
+
+  for (let cycle = 0; cycle < 4; cycle++) {
+    const phases: InteractionPhase[] = [];
+    perInstance.push(phases);
+    const lifecycle = createExperienceLifecycle({
+      clock: time.clock,
+      scheduler: time.scheduler,
+      inputTarget: input.target,
+      snapshots: { getSnapshot: () => IDLE_READY },
+      presentation: { returnToWorld: () => {} },
+      world: { isOrdering: () => false },
+      onPhase: (p) => phases.push(p),
+    });
+
+    lifecycle.start();
+    assert.equal(input.activeListenerCount(), 5, `cycle ${cycle}: exactly one listener per type`);
+    assert.equal(time.pendingCount(), 0);
+
+    input.dispatch(trusted.tap());
+    assert.deepEqual(phases, ["ACTIVE_STANDBY"], `cycle ${cycle}: this instance saw the tap exactly once`);
+    assert.equal(time.pendingCount(), 1, `cycle ${cycle}: exactly one timer`);
+
+    lifecycle.dispose();
+    assert.equal(input.activeListenerCount(), 0, `cycle ${cycle}: every listener removed`);
+    assert.equal(time.pendingCount(), 0, `cycle ${cycle}: timer cleared`);
+
+    // A disposed instance is inert: input, time, and even a stale timeout do nothing.
+    const seen = phases.length;
+    assert.equal(input.dispatch(trusted.tap()), 0, "no listener remains to receive input");
+    time.advanceBy(600_000);
+    time.fireStale();
+    assert.equal(phases.length, seen, `cycle ${cycle}: stale callback fired into a disposed instance`);
+  }
+
+  assert.equal(input.totalRegistrations(), 20, "5 listeners per mount, never more");
+  assert.equal(time.maxPendingSeen(), 1, "never more than one timer at once, across all cycles");
+  // Earlier instances never heard about later ones.
+  for (const phases of perInstance) assert.deepEqual(phases, ["ACTIVE_STANDBY"]);
+});
+
+test("H2. start() twice does not duplicate listeners; dispose() twice is safe; start() after dispose throws", () => {
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  const lifecycle = createExperienceLifecycle({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    inputTarget: input.target,
+    snapshots: { getSnapshot: () => IDLE_READY },
+    presentation: { returnToWorld: () => {} },
+    world: { isOrdering: () => false },
+  });
+
+  lifecycle.start();
+  lifecycle.start();
+  assert.equal(input.totalRegistrations(), 5);
+  assert.equal(input.activeListenerCount(), 5);
+
+  lifecycle.dispose();
+  assert.doesNotThrow(() => lifecycle.dispose());
+  assert.equal(input.activeListenerCount(), 0);
+  assert.throws(() => lifecycle.start(), /disposed/);
+  assert.equal(input.totalRegistrations(), 5, "a rejected restart registered nothing");
+});
+
+test("H3. two lifecycles mounted at once are independent", () => {
+  const timeA = createFakeTime();
+  const timeB = createFakeTime();
+  const inputA = createFakeInputTarget();
+  const inputB = createFakeInputTarget();
+  const make = (time: ReturnType<typeof createFakeTime>, input: ReturnType<typeof createFakeInputTarget>) =>
+    createExperienceLifecycle({
+      clock: time.clock,
+      scheduler: time.scheduler,
+      inputTarget: input.target,
+      snapshots: { getSnapshot: () => IDLE_READY },
+      presentation: { returnToWorld: () => {} },
+      world: { isOrdering: () => false },
+    });
+  const a = make(timeA, inputA);
+  const b = make(timeB, inputB);
+  a.start();
+  b.start();
+
+  inputA.dispatch(trusted.tap());
+  assert.equal(a.getPhase(), "ACTIVE_STANDBY");
+  assert.equal(b.getPhase(), "HABITAT_IDLE");
+
+  a.dispose();
+  inputB.dispatch(trusted.tap());
+  assert.equal(b.getPhase(), "ACTIVE_STANDBY");
+  b.dispose();
+});
+
+test("H4. a target that fails to bind leaves nothing running and the error surfaces", () => {
+  const time = createFakeTime();
+  const brittle = {
+    addEventListener: () => {
+      throw new Error("cannot bind");
+    },
+  } as unknown as EventTarget;
+  const lifecycle = createExperienceLifecycle({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    inputTarget: brittle,
+    snapshots: { getSnapshot: () => IDLE_READY },
+    presentation: { returnToWorld: () => {} },
+    world: { isOrdering: () => false },
+  });
+  assert.throws(() => lifecycle.start(), /cannot bind/);
+  assert.equal(time.pendingCount(), 0);
+  assert.throws(() => lifecycle.start(), /disposed/, "a failed start disposes the instance");
+});
+
+test("H5. end to end with the REAL monotonic clock, REAL timeouts and a REAL EventTarget (scaled thresholds)", async () => {
+  const target = new EventTarget();
+  const phases: InteractionPhase[] = [];
+  const lifecycle = createExperienceLifecycle({
+    clock: createMonotonicClock(),
+    scheduler: createTimeoutScheduler(),
+    inputTarget: target,
+    snapshots: { getSnapshot: () => IDLE_READY },
+    presentation: { returnToWorld: () => {} },
+    world: { isOrdering: () => false },
+    thresholds: { spaceGivenMs: 30, releasedMs: 60, contextExpiredMs: 150 },
+    onPhase: (p) => phases.push(p),
+  });
+  lifecycle.start();
+
+  // A script-dispatched event (isTrusted === false) is not customer input.
+  target.dispatchEvent(new Event("pointerdown"));
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+
+  // A trusted event is. (Node lets a test mark an instance trusted; browsers do not.)
+  const tap = new Event("pointerdown");
+  Object.defineProperty(tap, "isTrusted", { value: true });
+  target.dispatchEvent(tap);
+  assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY");
+
+  const deadline = performance.now() + 3_000;
+  while (lifecycle.getPhase() !== "HABITAT_IDLE" && performance.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  lifecycle.dispose();
+
+  assert.deepEqual(phases, ["ACTIVE_STANDBY", "SPACE_GIVEN", "RELEASED", "CONTEXT_EXPIRED", "HABITAT_IDLE"]);
+});
