@@ -286,6 +286,48 @@ function createExperienceOrchestrator(deps) {
     return { outcome: result && result.outcome };
   }
 
+  /**
+   * Releases the CUSTOMER context (never the business evidence) through
+   * Runtime's own guarded releaseCustomerContext() - not a Session End: no
+   * identity rotation, no persistence purge, no retry, no hydrate. Runtime
+   * stays the sole authority for whether a release is allowed (ACTIVE and
+   * CONFIRMATION only; UNKNOWN / AWAITING_OUTCOME / IDLE / not hydrated are
+   * refused or nothing-to-release), so this module adds no guard of its own.
+   *
+   * Emits NO event (a release is auditable through the returned result, not
+   * a new event, and it is deliberately not SESSION_ENDED). The only thing
+   * done on a genuine RELEASED is resetting the dedup memo to NONE, exactly
+   * like a genuine SESSION_ENDED does - otherwise the next customer's first
+   * outcome (e.g. the same CONFIRMED/DECLINED) would compare equal to the
+   * previous customer's leftover value and its event would be suppressed.
+   * REFUSED / NOTHING_TO_RELEASE leave the memo untouched.
+   */
+  async function releaseCustomerContext() {
+    let result;
+    try {
+      result = await runtime.releaseCustomerContext();
+    } catch (_error) {
+      return { outcome: "ORCHESTRATION_ERROR" };
+    }
+
+    if (!result || typeof result.outcome !== "string") {
+      return { outcome: "ORCHESTRATION_ERROR" };
+    }
+
+    if (result.outcome === "RELEASED") {
+      lastEmittedOrderStatus = OrderStatus.NONE;
+    }
+
+    // Constant audit fields only - re-listed rather than passed through, so
+    // nothing else Runtime ever adds to its result can leak out of here.
+    const audited = { outcome: result.outcome };
+    if (typeof result.reason === "string") audited.reason = result.reason;
+    if (typeof result.fromState === "string") audited.fromState = result.fromState;
+    if (typeof result.toState === "string") audited.toState = result.toState;
+    audited.callLog = Array.isArray(result.callLog) ? result.callLog.filter((step) => typeof step === "string") : [];
+    return Object.freeze(audited);
+  }
+
   function getSnapshot() {
     return currentSnapshot();
   }
@@ -307,6 +349,7 @@ function createExperienceOrchestrator(deps) {
     submit,
     retryUnknown,
     endSession,
+    releaseCustomerContext,
     getSnapshot,
     subscribe,
   });

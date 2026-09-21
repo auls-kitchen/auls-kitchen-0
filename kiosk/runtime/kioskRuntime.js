@@ -86,6 +86,9 @@ function createKioskRuntime(deps) {
   let sessionState = SessionStates.IDLE;
   let authoritativeResult = null;
   let hydrated = false;
+  // True only while a CONFIRMATION release is awaiting persistence; keeps two
+  // releases from interleaving read-modify-write persistence calls.
+  let releaseInFlight = false;
 
   /**
    * Startup hydration. Calls the injected persistence's own load()
@@ -400,6 +403,125 @@ function createKioskRuntime(deps) {
     return result;
   }
 
+  function releaseResult(outcome, reason, fromState, toState, callLog) {
+    const result = { outcome };
+    if (reason !== undefined) result.reason = reason;
+    result.fromState = fromState;
+    if (toState !== undefined) result.toState = toState;
+    result.callLog = Object.freeze(callLog.slice());
+    return Object.freeze(result);
+  }
+
+  /**
+   * Guarded customer-context release (U4 Slice 1). Frees the CUSTOMER
+   * context (Cart, name, notes, and a confirmation's local result) so the
+   * next customer starts fresh. It is deliberately NOT a Session End: it
+   * never rotates identity, purges persistence, calls the OrderIntent
+   * callable, retries, hydrates, or touches a SubmissionAttempt, and it
+   * has no path to any of the injected reset hooks.
+   *
+   *   ACTIVE            -> clear the in-memory Cart/context, session IDLE.
+   *                        No persistence call at all (Runtime never
+   *                        persists a Cart Draft; this mirrors clearCart).
+   *   CONFIRMATION      -> targeted removal of the local authoritativeResult
+   *                        only, then clear the Cart/context, session IDLE.
+   *                        The backend OrderIntent is never touched.
+   *   IDLE              -> NOTHING_TO_RELEASE.
+   *   AWAITING_OUTCOME  -> REFUSED (IN_FLIGHT / UNKNOWN / anomaly: the
+   *                        unresolved attempt is business evidence).
+   *   not hydrated      -> REFUSED.
+   *
+   * CONFIRMATION is persistence-first and fail-closed: it reads the stored
+   * record first (removeAuthoritativeResult's own read-modify-write would
+   * write a blank record over an unusable one, and would leave a stale
+   * SubmissionAttempt behind to be re-hydrated as a phantom UNKNOWN), and
+   * memory is mutated only after the removal is confirmed. On any failure
+   * memory is left exactly as it was and the outcome is REFUSED.
+   *
+   * Returns { outcome, reason?, fromState, toState?, callLog } - constant
+   * codes only, never a raw error.
+   */
+  async function releaseCustomerContext() {
+    const callLog = ["guard"];
+    const fromState = sessionState;
+    const refuse = (reason) => releaseResult("REFUSED", reason, fromState, undefined, callLog);
+
+    if (!hydrated) return refuse("NOT_HYDRATED");
+    if (sessionState === SessionStates.IDLE) {
+      return releaseResult("NOTHING_TO_RELEASE", undefined, fromState, undefined, callLog);
+    }
+    if (sessionState === SessionStates.AWAITING_OUTCOME) return refuse("OUTCOME_UNRESOLVED");
+    if (sessionState !== SessionStates.ACTIVE && sessionState !== SessionStates.CONFIRMATION) {
+      return refuse("STATE_NOT_RELEASABLE");
+    }
+    // A live attempt object can never belong to a releasable customer context.
+    if (submissionState !== null) return refuse("SUBMISSION_PRESENT");
+
+    if (sessionState === SessionStates.ACTIVE) {
+      if (authoritativeResult !== null) return refuse("RESULT_PRESENT");
+      callLog.push("clearCart", "resetSession");
+      cartState = createEmptyCartDraft();
+      sessionState = SessionStates.IDLE;
+      return releaseResult("RELEASED", undefined, fromState, SessionStates.IDLE, callLog);
+    }
+
+    // --- CONFIRMATION ---
+    if (authoritativeResult === null) return refuse("RESULT_MISSING");
+    if (releaseInFlight) return refuse("RELEASE_IN_PROGRESS");
+    releaseInFlight = true;
+    try {
+      const heldResult = authoritativeResult;
+      const heldOwnerUid = ownerUid;
+      const stillHolding = () =>
+        sessionState === SessionStates.CONFIRMATION &&
+        authoritativeResult === heldResult &&
+        submissionState === null &&
+        ownerUid === heldOwnerUid;
+
+      callLog.push("persistencePrecheck");
+      let loaded;
+      try {
+        loaded = await persistence.load(heldOwnerUid);
+      } catch (_error) {
+        return refuse("PERSISTENCE_READ_FAILED");
+      }
+      if (!stillHolding()) return refuse("STATE_CHANGED");
+
+      let removalNeeded = false;
+      if (loaded && loaded.status === ResultCodes.VALID) {
+        if (loaded.submissionAttempt) return refuse("PERSISTED_ATTEMPT_PRESENT");
+        removalNeeded = true;
+      } else if (loaded && loaded.status === ResultCodes.EMPTY) {
+        // Nothing persisted, so there is no local result to remove.
+      } else if (loaded && loaded.status === ResultCodes.READ_FAILURE) {
+        return refuse("PERSISTENCE_READ_FAILED");
+      } else {
+        // UID_MISMATCH / CORRUPT_RECORD / UNSUPPORTED_SCHEMA / anything unknown.
+        return refuse("PERSISTED_RECORD_NOT_RELEASABLE");
+      }
+
+      if (removalNeeded) {
+        callLog.push("removeAuthoritativeResult");
+        let removeResult;
+        try {
+          removeResult = await persistence.removeAuthoritativeResult(heldOwnerUid);
+        } catch (_error) {
+          return refuse("PERSISTENCE_REMOVE_FAILED");
+        }
+        if (!removeResult || removeResult.ok !== true) return refuse("PERSISTENCE_REMOVE_FAILED");
+        if (!stillHolding()) return refuse("STATE_CHANGED");
+      }
+
+      callLog.push("clearCart", "clearAuthoritativeResult", "resetSession");
+      cartState = createEmptyCartDraft();
+      authoritativeResult = null;
+      sessionState = SessionStates.IDLE;
+      return releaseResult("RELEASED", undefined, fromState, SessionStates.IDLE, callLog);
+    } finally {
+      releaseInFlight = false;
+    }
+  }
+
   /**
    * Read-only, customer-safe snapshot for UI composition (STEP 62 S17).
    * Never exposes persistence, the Auth callback, the OrderIntent
@@ -428,6 +550,7 @@ function createKioskRuntime(deps) {
     submit,
     retryUnknown,
     requestSessionEnd: endSession,
+    releaseCustomerContext,
     getSnapshot,
   };
 }

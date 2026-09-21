@@ -258,7 +258,7 @@ test("L. createBrowserKiosk does NOT expose Firebase objects (app/auth/functions
   assert.deepEqual(Object.keys(host).sort(), ["beginCustomerSession", "getBootstrapStatus", "orchestrator"]);
   assert.deepEqual(Object.keys(host.orchestrator).sort(), [
     "addItem", "clearCart", "decrementLine", "endSession", "getSnapshot", "hydrate",
-    "incrementLine", "removeLine", "retryUnknown", "setCustomerName", "setLineModifiers",
+    "incrementLine", "releaseCustomerContext", "removeLine", "retryUnknown", "setCustomerName", "setLineModifiers",
     "setNotes", "submit", "subscribe",
   ].sort());
 });

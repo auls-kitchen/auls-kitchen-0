@@ -227,6 +227,7 @@ test("A2. constructor succeeds with both dependencies and exposes exactly the do
     "getSnapshot",
     "hydrate",
     "incrementLine",
+    "releaseCustomerContext",
     "removeLine",
     "retryUnknown",
     "setCustomerName",
@@ -814,4 +815,195 @@ test("unexpected Runtime throw during submit() never fabricates an outcome or em
 
   assert.equal(result.outcome, "ORCHESTRATION_ERROR");
   assert.equal(received.length, 0);
+});
+
+// ============================================================
+// AL. releaseCustomerContext (U4 Slice 1)
+// ============================================================
+//
+// A pass-through to Runtime's guarded release. Emits NO event (not even
+// SESSION_ENDED), returns only constant audit fields, and resets the dedup
+// memo ONLY on a genuine RELEASED.
+
+test("AL1. releasing an ACTIVE customer context: RELEASED, snapshot back to an empty idle session, and NO event", async () => {
+  const { orchestrator, eventBus } = await buildOrchestrator(createSpyCallable(async () => ({ data: validBackendResult() })));
+  orchestrator.addItem({ productId: "p1", quantity: 2, selectedModifiers: [] });
+  assert.equal(orchestrator.getSnapshot().session, "active");
+  const received = subscribeCollector(eventBus);
+
+  const result = await orchestrator.releaseCustomerContext();
+
+  assert.deepEqual(result, { outcome: "RELEASED", fromState: "ACTIVE", toState: "IDLE", callLog: ["guard", "clearCart", "resetSession"] });
+  const snapshot = orchestrator.getSnapshot();
+  assert.equal(snapshot.session, "idle");
+  assert.deepEqual(snapshot.cart.lines, []);
+  assert.equal(snapshot.order.status, OrderStatus.NONE);
+  assert.deepEqual(received, []); // in particular no SESSION_ENDED
+});
+
+test("AL2. releasing a CONFIRMATION: RELEASED, snapshot back to idle with no order, NO event, audit result is customer-safe", async () => {
+  const { orchestrator, eventBus, persistence } = await buildOrchestrator(createSpyCallable(async () => ({ data: validBackendResult() })));
+  orchestrator.addItem({ productId: "p1", quantity: 1, selectedModifiers: [] });
+  await orchestrator.submit(); // -> CONFIRMED
+  assert.equal(orchestrator.getSnapshot().session, "confirmation");
+  const received = subscribeCollector(eventBus);
+
+  const result = await orchestrator.releaseCustomerContext();
+
+  assert.equal(result.outcome, "RELEASED");
+  assert.equal(result.fromState, "CONFIRMATION");
+  assert.equal(result.toState, "IDLE");
+  const snapshot = orchestrator.getSnapshot();
+  assert.equal(snapshot.session, "idle");
+  assert.equal(snapshot.order.status, OrderStatus.NONE);
+  assert.deepEqual(snapshot.cart.lines, []);
+  assert.deepEqual(received, []);
+  assertNoForbiddenKeys(result, "release result");
+  assertNoForbiddenStringValues(result, "release result");
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal((await persistence.load("uid-A")).authoritativeResult, null); // the local result is gone
+});
+
+test("AL3. after releasing a CONFIRMATION, the next customer's identical CONFIRMED outcome is announced again (dedup memo reset)", async () => {
+  const { orchestrator, eventBus } = await buildOrchestrator(createSpyCallable(async () => ({ data: validBackendResult() })));
+  orchestrator.addItem({ productId: "p1", quantity: 1, selectedModifiers: [] });
+  await orchestrator.submit(); // customer A -> CONFIRMED (memo is now CONFIRMED)
+  await orchestrator.releaseCustomerContext();
+  const received = subscribeCollector(eventBus);
+
+  orchestrator.addItem({ productId: "p1", quantity: 1, selectedModifiers: [] }); // customer B
+  await orchestrator.submit();
+
+  assert.deepEqual(
+    received.map((e) => e.type),
+    [ExperienceEventTypes.SESSION_STARTED, ExperienceEventTypes.SUBMISSION_STARTED, ExperienceEventTypes.ORDER_OUTCOME_CHANGED],
+  );
+  assert.equal(received[2].payload.status, OrderStatus.CONFIRMED);
+});
+
+test("AL4. after releasing an ACTIVE context left by a rejection, the next customer's DECLINED is announced again (dedup memo reset)", async () => {
+  const callable = createSpyCallable(async () => {
+    throw { code: "invalid-argument" };
+  });
+  const { orchestrator, eventBus } = await buildOrchestrator(callable);
+  orchestrator.addItem({ productId: "p1", quantity: 1, selectedModifiers: [] });
+  await orchestrator.submit(); // customer A -> DECLINED (memo is now DECLINED); session back to ACTIVE
+  assert.equal(orchestrator.getSnapshot().session, "active");
+  assert.equal((await orchestrator.releaseCustomerContext()).outcome, "RELEASED");
+  const received = subscribeCollector(eventBus);
+
+  orchestrator.addItem({ productId: "p1", quantity: 1, selectedModifiers: [] }); // customer B
+  await orchestrator.submit();
+
+  const outcomes = received.filter((e) => e.type === ExperienceEventTypes.ORDER_OUTCOME_CHANGED);
+  assert.equal(outcomes.length, 1);
+  assert.equal(outcomes[0].payload.status, OrderStatus.DECLINED);
+});
+
+test("AL5. a REFUSED release on an UNKNOWN attempt emits nothing, leaves the memo alone, and the attempt is still retryable", async () => {
+  let callCount = 0;
+  const callable = createSpyCallable(async () => {
+    callCount += 1;
+    if (callCount <= 2) throw { code: "internal" }; // submit + first retry stay UNKNOWN
+    return { data: validBackendResult() };
+  });
+  const { orchestrator, eventBus } = await buildOrchestrator(callable);
+  orchestrator.addItem({ productId: "p1", quantity: 1, selectedModifiers: [] });
+  await orchestrator.submit(); // UNCERTAIN emitted; memo is UNCERTAIN
+  const received = subscribeCollector(eventBus);
+
+  const release = await orchestrator.releaseCustomerContext();
+  assert.deepEqual(release, { outcome: "REFUSED", reason: "OUTCOME_UNRESOLVED", fromState: "AWAITING_OUTCOME", callLog: ["guard"] });
+  assert.equal(orchestrator.getSnapshot().order.status, OrderStatus.UNCERTAIN);
+
+  await orchestrator.retryUnknown(); // still UNKNOWN: a wrongly reset memo would announce UNCERTAIN a second time
+  assert.deepEqual(received, []);
+
+  await orchestrator.retryUnknown(); // now CONFIRMED, same key as the original attempt
+  assert.deepEqual(
+    received.map((e) => e.payload.status),
+    [OrderStatus.CONFIRMED],
+  );
+});
+
+test("AL6. NOTHING_TO_RELEASE on an idle session emits nothing", async () => {
+  const { orchestrator, eventBus } = await buildOrchestrator(createSpyCallable(async () => ({ data: validBackendResult() })));
+  const received = subscribeCollector(eventBus);
+
+  const result = await orchestrator.releaseCustomerContext();
+
+  assert.deepEqual(result, { outcome: "NOTHING_TO_RELEASE", fromState: "IDLE", callLog: ["guard"] });
+  assert.deepEqual(received, []);
+});
+
+test("AL7. a failed local removal is REFUSED: nothing emitted, the confirmation is still there (fail closed)", async () => {
+  const store = createInMemoryStore();
+  const realPersistence = createPersistenceAdapter(store);
+  const persistence = Object.assign({}, realPersistence, {
+    async removeAuthoritativeResult() {
+      return { ok: false, code: "WRITE_FAILURE" };
+    },
+  });
+  const runtime = createKioskRuntime({ persistence, callOrderIntent: createSpyCallable(async () => ({ data: validBackendResult() })) });
+  const eventBus = createEventBus();
+  const orchestrator = createExperienceOrchestrator({ runtime, eventBus });
+  await orchestrator.hydrate("uid-A");
+  orchestrator.addItem({ productId: "p1", quantity: 1, selectedModifiers: [] });
+  await orchestrator.submit(); // -> CONFIRMED
+  const received = subscribeCollector(eventBus);
+
+  const result = await orchestrator.releaseCustomerContext();
+
+  assert.equal(result.outcome, "REFUSED");
+  assert.equal(result.reason, "PERSISTENCE_REMOVE_FAILED");
+  assert.equal(orchestrator.getSnapshot().session, "confirmation");
+  assert.equal(orchestrator.getSnapshot().order.status, OrderStatus.CONFIRMED);
+  assert.deepEqual(received, []);
+});
+
+test("AL8. an unexpected Runtime throw, or a malformed Runtime result, is ORCHESTRATION_ERROR with no event", async () => {
+  const snapshot = () => ({ cart: { lines: [], customerName: null, notes: null }, submission: null, session: "ACTIVE", authoritativeResult: null, hydrated: true });
+  for (const releaseCustomerContext of [
+    async () => {
+      throw new Error("unexpected");
+    },
+    async () => ({}),
+    async () => null,
+  ]) {
+    const eventBus = createEventBus();
+    const orchestrator = createExperienceOrchestrator({ runtime: { getSnapshot: snapshot, releaseCustomerContext }, eventBus });
+    const received = subscribeCollector(eventBus);
+
+    const result = await orchestrator.releaseCustomerContext();
+
+    assert.deepEqual(result, { outcome: "ORCHESTRATION_ERROR" });
+    assert.equal(received.length, 0);
+  }
+});
+
+test("AL9. the audit result is re-listed, so nothing else Runtime returns can leak through the orchestrator", async () => {
+  const runtime = {
+    getSnapshot: () => ({ cart: { lines: [], customerName: null, notes: null }, submission: null, session: "CONFIRMATION", authoritativeResult: null, hydrated: true }),
+    releaseCustomerContext: async () => ({
+      outcome: "REFUSED",
+      reason: "PERSISTENCE_REMOVE_FAILED",
+      fromState: "CONFIRMATION",
+      callLog: ["guard", 5, "persistencePrecheck"],
+      error: new Error("secret"),
+      ownerUid: "uid-A",
+      detail: "raw",
+    }),
+  };
+  const orchestrator = createExperienceOrchestrator({ runtime, eventBus: createEventBus() });
+
+  const result = await orchestrator.releaseCustomerContext();
+
+  assert.deepEqual(result, {
+    outcome: "REFUSED",
+    reason: "PERSISTENCE_REMOVE_FAILED",
+    fromState: "CONFIRMATION",
+    callLog: ["guard", "persistencePrecheck"],
+  });
+  assert.equal(Object.isFrozen(result), true);
+  assertNoForbiddenKeys(result, "audited result");
 });
