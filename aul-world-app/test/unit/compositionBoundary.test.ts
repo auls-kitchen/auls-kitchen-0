@@ -23,6 +23,8 @@ const SRC_ROOT = path.resolve(HERE, "..", "..", "src");
 const AWR_SRC = path.resolve(HERE, "..", "..", "..", "aul-world-runtime", "src");
 
 const COMPOSITION = "composition/compositionRoot.ts";
+// Composition files that are NOT the root: injected and pure, held to the strict scan (CB13).
+const COMPOSITION_HELPERS = ["composition/contextTransitions.ts"];
 const SHELL_FILES = ["shell/shellModel.ts", "shell/experienceShell.ts"];
 
 // The AWR modules the Composition may import DIRECTLY (what AWR's own bootstrap
@@ -122,7 +124,11 @@ test("CB4. it imports no Kiosk code of any kind (the host arrives by injection)"
 
 test("CB5. no lifecycle, shell or contract file mentions `host` or imports AWR or the Kiosk", () => {
   const others = walk(SRC_ROOT).filter((f) => f !== COMPOSITION);
-  assert.equal(others.length, 9, "expected exactly the 8 U0-U3 non-composition source files plus U4 Slice 2A's takeoverPolicy.ts");
+  assert.equal(
+    others.length,
+    10,
+    "expected exactly the 8 U0-U3 non-composition source files, U4 Slice 2A's takeoverPolicy.ts, and U4 Slice 2B's composition/contextTransitions.ts",
+  );
   for (const file of others) {
     const code = stripComments(read(file));
     assert.equal(/\bhost\b/.test(code), false, `${file} names a host`);
@@ -136,8 +142,15 @@ test("CB6. no file can join src/shell/ or src/composition/ without being scanned
   assert.deepEqual(walk(path.join(SRC_ROOT, "shell")).map((f) => `shell/${f.replace(/^shell\//, "")}`).sort(), [...SHELL_FILES].sort());
   assert.deepEqual(
     walk(path.join(SRC_ROOT, "composition")).map((f) => f.replace(/^composition\//, "composition/")).sort(),
-    [COMPOSITION],
+    [COMPOSITION, ...COMPOSITION_HELPERS].sort(),
   );
+});
+
+test("CB13. every composition helper other than the root is held to the strict Experience scan (no Domain name, no clock, imports only inside src)", () => {
+  for (const file of COMPOSITION_HELPERS) {
+    const violations = scanSource(abs(file), read(file), SRC_ROOT);
+    assert.deepEqual(violations, [], `${file}: ${JSON.stringify(violations)}`);
+  }
 });
 
 // ============================================================
