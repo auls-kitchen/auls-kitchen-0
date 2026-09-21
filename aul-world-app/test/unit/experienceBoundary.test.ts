@@ -288,8 +288,9 @@ test("C14. consumeGesture (the latched phase-before-input) is named only where i
   ]);
 });
 
-test("C15. Slice 2A: no source file names releaseCustomerContext at all - X/Home records a decision and performs no release", () => {
-  assert.deepEqual(namedIn(/\breleaseCustomerContext\b/), []);
+test("C15. S3: only the Composition root names releaseCustomerContext - never the timer, lifecycle, policy, shell or coordinator", () => {
+  // (2A: no file named it. S3: the Composition names it - the port member and its single call site - and nothing else does.)
+  assert.deepEqual(namedIn(/\breleaseCustomerContext\b/), ["composition/compositionRoot.ts"]);
 });
 
 test("C16. Slice 2A: the phase latch is written only inside the lifecycle, and only a `press` kind reaches it", () => {

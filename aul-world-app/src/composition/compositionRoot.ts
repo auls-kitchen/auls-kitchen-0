@@ -12,8 +12,11 @@
 //   AWR -> here          : the AWR event bus and WorldState, both owned here
 //   here -> Experience   : narrow ports only (see createExperienceLifecycle)
 //   here -> Kiosk Domain : the KioskHostPort below - getSnapshot, subscribe,
-//                          getBootstrapStatus, and ONE beginCustomerSession()
-//                          at mount. No other Domain method is ever named.
+//                          getBootstrapStatus, ONE beginCustomerSession() at
+//                          mount, and ONE releaseCustomerContext(), which is
+//                          handed to the context-transitions coordinator as a
+//                          plain function and is the only Domain release seam.
+//                          No other Domain method is ever named.
 //
 // Ownership: the Composition owns the lifecycle of everything it creates.
 // mountAulWorld() returns its handle SYNCHRONOUSLY; `ready` settles once the
@@ -39,12 +42,13 @@ import { createExperienceLifecycle } from "../experience/createExperienceLifecyc
 import type { ExperienceLifecycle } from "../experience/createExperienceLifecycle.ts";
 import type { InteractiveTargetPredicate } from "../experience/customerInput.ts";
 import type { InteractionPhase, InteractionThresholds, RestingPhase } from "../experience/interactionContext.ts";
-import { routeCustomerReturn } from "../experience/pendingTicket.ts";
+import { releasePlanFor, routeCustomerReturn } from "../experience/pendingTicket.ts";
 import type { WakeDecision } from "../experience/pendingTicket.ts";
 import { createMonotonicClock, createTimeoutScheduler } from "../experience/silenceTimer.ts";
 import { decideTakeover } from "../experience/takeoverPolicy.ts";
 import type { TakeoverDecision } from "../experience/takeoverPolicy.ts";
 import { createExperienceShell } from "../shell/experienceShell.ts";
+import { createContextTransitions } from "./contextTransitions.ts";
 
 // The whole Domain surface the Composition may touch, structurally typed so
 // nothing here imports Kiosk code. The Kiosk Host returned by
@@ -53,6 +57,8 @@ export interface KioskHostPort {
   readonly orchestrator: {
     getSnapshot(): ExperienceSnapshotView;
     subscribe(listener: (event: { readonly type: string }) => void): () => void;
+    // The Domain's guarded customer-context release. Its result is opaque here.
+    releaseCustomerContext(): Promise<unknown>;
   };
   beginCustomerSession(): Promise<{ readonly status: string }>;
   getBootstrapStatus(): string;
@@ -251,6 +257,34 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
 
     renderAll();
 
+    // --- Context transitions: the ONE Domain release seam --------------------
+    // The Domain's guarded release is handed to the coordinator as a plain
+    // function; this is the only place it is named. Created BEFORE the lifecycle,
+    // so on dispose (reverse order) the timer stops first and the coordinator
+    // is disposed after it.
+    const transitions = createContextTransitions({
+      release: () => host.orchestrator.releaseCustomerContext(),
+      onError: report,
+    });
+    cleanups.push(() => transitions.dispose());
+
+    // CONTEXT_EXPIRED: read ONE snapshot and, only for a releasable customer
+    // context, start one guarded release. UNKNOWN / AWAITING_OUTCOME (PROTECTED),
+    // an idle session, and anything unreadable never reach the Domain. The
+    // verdict is deliberately not inspected or awaited: nothing is presented
+    // because of it (S3 is only this wiring).
+    function handleContextExpired(): void {
+      let snapshot: ExperienceSnapshotView | null = null;
+      try {
+        snapshot = snapshots.getSnapshot();
+      } catch (error) {
+        report(error);
+        // Fail closed: an unreadable Domain is NOT_READY, and NOT_READY never releases.
+      }
+      if (releasePlanFor(snapshot) !== "RELEASE") return;
+      void transitions.release("EXPIRY");
+    }
+
     // --- Experience lifecycle: the only timer, given only narrow ports -------
     const experience = createExperienceLifecycle({
       clock: options.clock ?? createMonotonicClock(),
@@ -273,6 +307,7 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
         shell.setWake(decision);
         options.onWake?.(decision);
       },
+      onContextExpired: handleContextExpired,
       onError: report,
     });
     lifecycle = experience;

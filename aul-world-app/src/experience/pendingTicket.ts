@@ -67,3 +67,31 @@ export function routeCustomerReturn(snapshot: ExperienceSnapshotView | null | un
   if (hasPendingTicket(pending)) return Object.freeze({ route: "OWNERSHIP_CONFIRMATION", pending });
   return Object.freeze({ route: "DISCOVER_MENU", pending });
 }
+
+// What a context expiry may ask the Domain to do about the customer context it finds.
+//   RELEASE          a customer context is there and releasable: an ACTIVE session
+//                    (with Cart lines OR an empty Cart - the name/notes/session are
+//                    still customer context) or a CONFIRMATION
+//   NONE_TO_RELEASE  an idle session: nothing to release
+//   PROTECTED        an unresolved submission (AWAITING_OUTCOME / UNKNOWN / a pending or
+//                    uncertain order): business evidence, never released by the caller
+//   NOT_READY        the snapshot cannot be read as a ready Domain: never guessed
+export type ReleasePlan = "RELEASE" | "NONE_TO_RELEASE" | "PROTECTED" | "NOT_READY";
+
+// Pure and read-only: it looks at a snapshot the caller already read and returns a
+// constant. It performs no Domain action, holds no handle, and is total - anything it
+// cannot read (including a snapshot whose getters throw) is NOT_READY, so a failure
+// here can only ever mean "do not release". Unlike classifyPending it separates an
+// ACTIVE session with an empty Cart (releasable) from an idle one (nothing to release).
+export function releasePlanFor(snapshot: ExperienceSnapshotView | null | undefined): ReleasePlan {
+  try {
+    const pending = classifyPending(snapshot);
+    if (pending === "NOT_READY") return "NOT_READY";
+    if (pending === "UNRESOLVED") return "PROTECTED";
+    // Past this point classifyPending has validated the snapshot and its session.
+    const session = (snapshot as { readonly session?: unknown }).session;
+    return session === "active" || session === "confirmation" ? "RELEASE" : "NONE_TO_RELEASE";
+  } catch {
+    return "NOT_READY";
+  }
+}

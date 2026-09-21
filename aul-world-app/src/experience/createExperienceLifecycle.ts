@@ -3,6 +3,7 @@
 //
 //   customer input (DOM) -> customerInput -> sink -> silenceTimer -> phase
 //   phase changes        -> onPhase (presentation callback, for the shell)
+//   CONTEXT_EXPIRED      -> onContextExpired() (fire-and-forget; the owner decides what expiry means)
 //   HABITAT_IDLE entered -> presentation.returnToWorld(), only if AWR is in ORDERING
 //   woke from HABITAT    -> read ONE Domain snapshot -> routeCustomerReturn -> onWake
 //
@@ -76,6 +77,12 @@ export interface ExperienceLifecycleOptions {
   // Presentation-only callback: every phase entered, in order (including the
   // transient CONTEXT_EXPIRED). For the future shell; carries no business data.
   readonly onPhase?: (phase: InteractionPhase) => void;
+  // Called exactly once each time the 5-minute silence window expires: right after
+  // onPhase("CONTEXT_EXPIRED"), before HABITAT_IDLE is handled and before any wake.
+  // No arguments: the lifecycle hands over nothing and holds no Domain handle. It is
+  // never awaited; a synchronous throw or a rejection is reported through onError.
+  // Never called after dispose(), at boot, or for the 15s / 25s phases.
+  readonly onContextExpired?: () => void | Promise<void>;
   // Called once per wake from HABITAT_IDLE with where the customer should go.
   readonly onWake?: (decision: WakeDecision) => void;
   readonly onError?: (error: unknown) => void;
@@ -105,7 +112,7 @@ interface LatchedPress {
 }
 
 export function createExperienceLifecycle(options: ExperienceLifecycleOptions): ExperienceLifecycle {
-  const { clock, scheduler, inputTarget, snapshots, presentation, world, onPhase, onWake, onError } = options;
+  const { clock, scheduler, inputTarget, snapshots, presentation, world, onPhase, onWake, onContextExpired, onError } = options;
 
   // Reject a bad freshness bound up front, before anything is built or bound.
   // `undefined` means "use the default"; anything else must be a positive finite
@@ -154,12 +161,28 @@ export function createExperienceLifecycle(options: ExperienceLifecycleOptions): 
     }
   }
 
+  // Tells the owner that the silence window expired. Fire-and-forget: the lifecycle
+  // never awaits it, never passes it anything, and never lets it break the timeline.
+  function notifyContextExpired(): void {
+    // The timer only checks ITS OWN disposed flag between transitions, so a dispose()
+    // made inside onPhase(CONTEXT_EXPIRED) still reaches this point: nothing may run.
+    if (disposed || onContextExpired === undefined) return;
+    try {
+      // A rejection (or a thenable that throws) is reported here, so it can never
+      // become an unhandled rejection. report() itself never throws.
+      void Promise.resolve(onContextExpired()).catch(report);
+    } catch (error) {
+      report(error);
+    }
+  }
+
   function handleTransition(transition: TimerTransition): void {
     try {
       onPhase?.(transition.phase);
     } catch (error) {
       report(error);
     }
+    if (transition.phase === "CONTEXT_EXPIRED") notifyContextExpired();
     if (transition.phase === "HABITAT_IDLE") enterHabitat();
     if (transition.wokeFromHabitat) wake();
   }

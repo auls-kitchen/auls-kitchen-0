@@ -159,7 +159,7 @@ test("E6. Habitat entry does NOT touch AWR when it is not in ORDERING (Aul focus
   expect(await attribute(page, "data-world-presentation")).toBe("WORLD");
 });
 
-test("E7. the 15s / 25s / 5min lifecycle never touches the Domain (cart, session, order, identity)", async ({ page }) => {
+test("E7. the 15s / 25s lifecycle never touches the Domain, and the 5min expiry's ONLY Domain effect is the one guarded release (orders, identity untouched)", async ({ page }) => {
   await mount(page);
   await page.evaluate(() => (window as any).__u3.domain.addItem());
   await freezeTime(page);
@@ -169,12 +169,18 @@ test("E7. the 15s / 25s / 5min lifecycle never touches the Domain (cart, session
   await tapWorld(page, AWR.emptySpace);
   await advance(page, 15_000);
   await advance(page, 10_000);
-  await advance(page, 274_900);
-  await advance(page, 100);
+  await advance(page, 274_999);
+  expect(await phase(page)).toBe("RELEASED"); // 299,999 ms: 1 ms before the expiry
+  expect(await domain(page)).toEqual(before); // nothing of 15s / 25s / 299.999s touched the Domain
+  expect((await counters(page)).portCalls.releaseCustomerContext).toBe(0);
+
+  await advance(page, 1);
   expect(await phase(page)).toBe("HABITAT_IDLE");
 
-  expect(await domain(page)).toEqual(before);
+  // U4 S3: the expiry started exactly one release of the (releasable) customer context - nothing else.
+  await expect.poll(() => domain(page)).toMatchObject({ session: "idle", cartLines: 0 });
   const c = await counters(page);
+  expect(c.portCalls.releaseCustomerContext).toBe(1);
   expect(c.orderIntentCalls).toBe(0);
   expect(c.signOutCalls).toBe(0);
   expect(c.signInCalls).toBe(1); // only the one boot sign-in: no identity rotation

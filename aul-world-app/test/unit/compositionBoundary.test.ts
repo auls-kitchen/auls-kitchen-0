@@ -56,8 +56,9 @@ const FORBIDDEN_AWR_IMPORTS = [
 
 // The composition file's explicit, narrow relaxations.
 const COMPOSITION_OPTIONS: ScanOptions = {
-  // The one Domain call it makes: the boot, once, at mount.
-  allowIdentifiers: ["beginCustomerSession"],
+  // The two Domain calls it makes: the boot, once, at mount; and the guarded
+  // release, once, handed to the context-transitions coordinator (U4 S3).
+  allowIdentifiers: ["beginCustomerSession", "releaseCustomerContext"],
   // AWR's own frame loop (never the interaction clock).
   allowClockLabels: ["requestAnimationFrame", "TICK", "deltaMs"],
   isImportAllowed: (resolved) => {
@@ -99,7 +100,7 @@ test("CB2. its AWR imports are exactly the allow-listed production modules (no m
   }
 });
 
-test("CB3. it names the Domain only as four host members, and calls beginCustomerSession exactly once", () => {
+test("CB3. it names the Domain only as five host members, and calls beginCustomerSession and releaseCustomerContext exactly once each", () => {
   const code = stripComments(read(COMPOSITION));
   const accessed = new Set<string>();
   for (const match of code.matchAll(/\bhost\s*\.\s*([A-Za-z_]+)(?:\s*\.\s*([A-Za-z_]+))?/g)) {
@@ -107,9 +108,14 @@ test("CB3. it names the Domain only as four host members, and calls beginCustome
   }
   assert.deepEqual(
     [...accessed].sort(),
-    ["beginCustomerSession", "getBootstrapStatus", "orchestrator.getSnapshot", "orchestrator.subscribe"],
+    ["beginCustomerSession", "getBootstrapStatus", "orchestrator.getSnapshot", "orchestrator.releaseCustomerContext", "orchestrator.subscribe"],
   );
   assert.equal([...code.matchAll(/\bhost\s*\.\s*beginCustomerSession\s*\(/g)].length, 1, "beginCustomerSession must have exactly one call site");
+  assert.equal(
+    [...code.matchAll(/\bhost\s*\.\s*orchestrator\s*\.\s*releaseCustomerContext\s*\(/g)].length,
+    1,
+    "releaseCustomerContext must have exactly one call site",
+  );
 });
 
 test("CB4. it imports no Kiosk code of any kind (the host arrives by injection)", () => {
@@ -195,6 +201,79 @@ test("CB12. Slice 2A: the Composition's Home boundary reads one snapshot, applie
   for (const forbidden of ["host", "bus", "shell.", "setWake", "setPhase", "routeCustomerReturn", "returnToWorld", "MENU_INTENT", "RETURN_TO_WORLD", "RESET_WORLD"]) {
     assert.equal(boundary.includes(forbidden), false, `the Home boundary must not touch ${forbidden}`);
   }
+  // S3 wired a release for the 5-minute expiry only: Home/X stays release-free (takeover is a later slice).
+  for (const forbidden of ["releaseCustomerContext", "transitions", "releasePlanFor"]) {
+    assert.equal(boundary.includes(forbidden), false, `the Home boundary must not touch ${forbidden}`);
+  }
+});
+
+// ============================================================
+// U4 Slice 2B, S3: the expiry -> guarded release wiring, and nothing more
+// ============================================================
+
+const compositionCode = () => stripComments(read(COMPOSITION));
+const expiryHandler = (): string => {
+  const code = compositionCode();
+  const start = code.indexOf("function handleContextExpired(): void {");
+  const end = code.indexOf("const experience = createExperienceLifecycle(");
+  assert.ok(start > 0 && end > start, "the expiry handler must be found");
+  return code.slice(start, end);
+};
+
+test("CB14. S3: the Domain release is named ONCE, as the coordinator's injected function - the only release seam", () => {
+  const code = compositionCode();
+  assert.equal([...code.matchAll(/\breleaseCustomerContext\b/g)].length, 2, "the port type member and the one call site, nothing else");
+  assert.match(code, /createContextTransitions\(\{\s*release:\s*\(\)\s*=>\s*host\.orchestrator\.releaseCustomerContext\(\),/);
+  assert.equal([...code.matchAll(/\bcreateContextTransitions\s*\(/g)].length, 1, "exactly one coordinator");
+});
+
+test("CB15. S3: the expiry handler reads ONE snapshot, applies releasePlanFor, and only for RELEASE starts a release with cause EXPIRY - fire and forget", () => {
+  const handler = expiryHandler();
+  const read = handler.indexOf("snapshots.getSnapshot()");
+  const plan = handler.indexOf('releasePlanFor(snapshot) !== "RELEASE"');
+  const release = handler.indexOf('void transitions.release("EXPIRY")');
+  assert.ok(read > 0 && plan > read && release > plan, "read, then plan guard, then release - in that order");
+  assert.equal([...handler.matchAll(/getSnapshot\s*\(/g)].length, 1, "exactly one snapshot read");
+  assert.equal([...compositionCode().matchAll(/\btransitions\s*\.\s*release\s*\(/g)].length, 1, "one release call in the whole composition");
+  assert.equal([...compositionCode().matchAll(/\breleasePlanFor\s*\(/g)].length, 1, "one plan guard");
+  // The verdict is neither awaited nor inspected, and nothing is presented because of it.
+  for (const forbidden of ["await", ".then", ".catch", "verdict", "shell.", "setWake", "setPhase", "bus.", "onWake", "onPhase", "RESET_WORLD", "RETURN_TO_WORLD", "OBJECT_INTERACTED"]) {
+    assert.equal(handler.includes(forbidden), false, `the expiry handler must not use ${forbidden}`);
+  }
+});
+
+test("CB16. S3: the lifecycle gets the handler; the coordinator is created before the lifecycle and disposed AFTER it (reverse cleanup order)", () => {
+  const code = compositionCode();
+  const created = code.indexOf("const transitions = createContextTransitions(");
+  const disposePush = code.indexOf("cleanups.push(() => transitions.dispose())");
+  const lifecycleCreated = code.indexOf("const experience = createExperienceLifecycle(");
+  const lifecyclePush = code.indexOf("cleanups.push(() => experience.dispose())");
+  assert.ok(created > 0 && disposePush > created, "the coordinator's dispose is registered right after it is created");
+  assert.ok(lifecycleCreated > disposePush, "the lifecycle is created after the coordinator's cleanup is registered");
+  assert.ok(lifecyclePush > lifecycleCreated, "and its own cleanup is registered later, so it runs FIRST on dispose");
+  assert.match(code, /onContextExpired:\s*handleContextExpired,/);
+  assert.equal([...code.matchAll(/\bonContextExpired\s*:/g)].length, 1);
+});
+
+test("CB17. S3: nothing of S4 entered the Composition - only the three already-approved AWR events, no world reset, no takeover release, no reconcile", () => {
+  const code = compositionCode();
+  const emitted = [...code.matchAll(/bus\.emit\(\s*\{\s*type:\s*"(\w+)"/g)].map((m) => m[1]).sort();
+  assert.deepEqual(emitted, ["MENU_INTENT", "RETURN_TO_WORLD", "TICK"]);
+  for (const forbidden of [
+    "RESET_WORLD",
+    "DOM_PANEL_ACTION",
+    "OBJECT_INTERACTED",
+    "afterSettle",
+    "isSettling",
+    "classifyReleaseResult",
+    "WAKE_RECONCILE",
+    "REBOOT_BOUNDARY",
+    '"TAKEOVER"',
+    "UNAVAILABLE",
+    "unavailable",
+  ]) {
+    assert.equal(code.includes(forbidden), false, `the composition must not contain ${forbidden} yet`);
+  }
 });
 
 // ============================================================
@@ -203,7 +282,7 @@ test("CB12. Slice 2A: the Composition's Home boundary reads one snapshot, applie
 
 const FAKE = abs(COMPOSITION);
 
-test("CB9. negative control: Domain capabilities beyond the four allowed are caught", () => {
+test("CB9. negative control: Domain capabilities beyond the allowed ones are caught", () => {
   for (const call of ["host.orchestrator.endSession('x')", "host.orchestrator.clearCart()", "host.orchestrator.retryUnknown()", "host.orchestrator.addItem({})", "host.hydrate()", "host.requestAuthReset()"]) {
     const violations = scanSource(FAKE, `export const x = () => ${call};`, SRC_ROOT, COMPOSITION_OPTIONS);
     assert.ok(violations.some((v) => v.kind === "FORBIDDEN_IDENTIFIER"), `not caught: ${call}`);
@@ -212,6 +291,12 @@ test("CB9. negative control: Domain capabilities beyond the four allowed are cau
   assert.deepEqual(scanSource(FAKE, "export const boot = () => host.beginCustomerSession();", SRC_ROOT, COMPOSITION_OPTIONS), []);
   assert.ok(scanSource(abs("shell/experienceShell.ts"), "export const boot = () => host.beginCustomerSession();", SRC_ROOT).length > 0);
   assert.ok(scanSource(abs("experience/silenceTimer.ts"), "export const boot = () => host.beginCustomerSession();", SRC_ROOT).length > 0);
+  // releaseCustomerContext is the composition's other exception - and ONLY the composition's.
+  const release = "export const go = () => host.orchestrator.releaseCustomerContext();";
+  assert.deepEqual(scanSource(FAKE, release, SRC_ROOT, COMPOSITION_OPTIONS), []);
+  for (const file of ["shell/experienceShell.ts", "shell/shellModel.ts", "experience/silenceTimer.ts", "experience/createExperienceLifecycle.ts", "experience/takeoverPolicy.ts", "composition/contextTransitions.ts"]) {
+    assert.ok(scanSource(abs(file), release, SRC_ROOT).some((v) => v.detail === "releaseCustomerContext"), `not caught in ${file}`);
+  }
 });
 
 test("CB10. negative control: importing AWR's main.ts or any proof/test artifact, or any Kiosk module, is caught", () => {

@@ -43,6 +43,7 @@ interface HarnessOptions {
   readonly ordering?: boolean;
   readonly thresholds?: ExperienceLifecycleOptions["thresholds"];
   readonly gestureMaxAgeMs?: number;
+  readonly onContextExpired?: ExperienceLifecycleOptions["onContextExpired"];
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -73,6 +74,7 @@ function harness(options: HarnessOptions = {}) {
     world: { isOrdering: () => world.ordering },
     thresholds: options.thresholds,
     gestureMaxAgeMs: options.gestureMaxAgeMs,
+    onContextExpired: options.onContextExpired,
     onPhase: (phase) => phases.push(phase),
     onWake: (decision) => wakes.push(decision),
     onError: (error) => errors.push(error),
@@ -1140,4 +1142,344 @@ test("LF15. a stale latch is refused even when a later, unrelated input keeps th
   input.dispatch(trusted.hover()); // hover is not input at all
   input.dispatch(makeEvent("scroll"));
   assert.equal(lifecycle.consumeGesture(), null);
+});
+
+// ============================================================
+// U4 Slice 2B, S3: onContextExpired - the 5-minute expiry hook
+// ============================================================
+//
+// Fired once per expiry crossing, right after onPhase("CONTEXT_EXPIRED") and before
+// HABITAT_IDLE and any wake; zero arguments; never awaited; throws and rejections
+// are reported through onError; never after dispose(). The lifecycle holds no Domain
+// handle and hands the hook nothing.
+
+const flushMicrotasks = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+function watchUnhandled() {
+  const seen: unknown[] = [];
+  const handler = (reason: unknown): void => void seen.push(reason);
+  process.on("unhandledRejection", handler);
+  return { seen, stop: (): void => void process.off("unhandledRejection", handler) };
+}
+
+// A lifecycle that logs everything the timeline does into ONE ordered list.
+function orderedLifecycle(options: { hook?: () => void | Promise<void>; onPhaseAlso?: (phase: InteractionPhase) => void } = {}) {
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  const log: string[] = [];
+  const lifecycle: ReturnType<typeof createExperienceLifecycle> = createExperienceLifecycle({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    inputTarget: input.target,
+    snapshots: { getSnapshot: () => IDLE_READY },
+    presentation: { returnToWorld: () => void log.push("returnToWorld") },
+    world: { isOrdering: () => true },
+    onPhase: (phase) => {
+      log.push(`phase:${phase}`);
+      options.onPhaseAlso?.(phase);
+    },
+    onWake: () => void log.push("wake"),
+    onContextExpired: options.hook ? () => {
+      log.push("hook");
+      return options.hook!();
+    } : () => void log.push("hook"),
+  });
+  lifecycle.start();
+  return { time, input, lifecycle, log };
+}
+
+test("LX1. the hook fires once, exactly at 300s of silence: not at 299,999 ms, yes at 300,000 ms", () => {
+  let calls = 0;
+  const { time, input, lifecycle } = harness({ onContextExpired: () => void (calls += 1) });
+  input.dispatch(trusted.tap());
+
+  time.advanceBy(299_999);
+  assert.equal(calls, 0);
+  assert.equal(lifecycle.getPhase(), "RELEASED");
+
+  time.advanceBy(1);
+  assert.equal(calls, 1);
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+});
+
+test("LX2. it does not fire at boot, at 15s (SPACE_GIVEN), at 25s (RELEASED), or for any input", () => {
+  let calls = 0;
+  const { time, input, lifecycle } = harness({ onContextExpired: () => void (calls += 1) });
+  assert.equal(calls, 0, "not at boot");
+  time.advanceBy(3_600_000);
+  assert.equal(calls, 0, "not while idle from boot");
+
+  input.dispatch(trusted.tap());
+  time.advanceBy(15_000);
+  assert.equal(lifecycle.getPhase(), "SPACE_GIVEN");
+  assert.equal(calls, 0, "not at 15s");
+  time.advanceBy(10_000);
+  assert.equal(lifecycle.getPhase(), "RELEASED");
+  assert.equal(calls, 0, "not at 25s");
+  input.dispatch(trusted.tap()); // input restarts the window: still no expiry
+  time.advanceBy(299_999);
+  assert.equal(calls, 0);
+});
+
+test("LX3. exactly once per crossing: repeated firing, late firing and an hour of silence never repeat it; a second customer's expiry fires it again", () => {
+  let calls = 0;
+  const { time, input } = harness({ onContextExpired: () => void (calls += 1) });
+  input.dispatch(trusted.tap());
+  time.advanceBy(300_000);
+  time.advanceBy(3_600_000);
+  time.fireDue();
+  time.fireDue();
+  time.fireStale();
+  assert.equal(calls, 1);
+
+  input.dispatch(trusted.tap()); // a second customer
+  time.advanceBy(300_000);
+  assert.equal(calls, 2, "a new crossing, a new call");
+
+  // A late timer: one overdue timeout catches up through every phase, still ONE expiry.
+  input.dispatch(trusted.tap());
+  time.jumpBy(600_000);
+  time.fireDue();
+  time.fireDue();
+  assert.equal(calls, 3);
+});
+
+test("LX4. order: onPhase(CONTEXT_EXPIRED), then the hook, then HABITAT_IDLE (and returnToWorld), and the wake stays last", () => {
+  const { time, input, log } = orderedLifecycle();
+  input.dispatch(trusted.tap());
+  log.length = 0;
+  time.advanceBy(300_000);
+  assert.deepEqual(log, ["phase:SPACE_GIVEN", "phase:RELEASED", "phase:CONTEXT_EXPIRED", "hook", "phase:HABITAT_IDLE", "returnToWorld"]);
+
+  // The late-timer path: the input evaluates the missed silence first, so the expiry - and the hook - come BEFORE the wake.
+  const late = orderedLifecycle();
+  late.input.dispatch(trusted.tap());
+  late.log.length = 0;
+  late.time.jumpBy(360_000);
+  late.input.dispatch(trusted.tap());
+  assert.deepEqual(late.log, [
+    "phase:SPACE_GIVEN",
+    "phase:RELEASED",
+    "phase:CONTEXT_EXPIRED",
+    "hook",
+    "phase:HABITAT_IDLE",
+    "returnToWorld",
+    "phase:ACTIVE_STANDBY",
+    "wake",
+  ]);
+});
+
+test("LX5. the hook is NOT awaited: a promise that never settles blocks nothing - Habitat is entered, the World returned, and the next wake works", () => {
+  const { time, input, log, lifecycle } = orderedLifecycle({ hook: () => new Promise<void>(() => {}) });
+  input.dispatch(trusted.tap());
+  log.length = 0;
+  time.advanceBy(300_000); // synchronous: everything below already happened
+  assert.deepEqual(log.slice(-3), ["hook", "phase:HABITAT_IDLE", "returnToWorld"]);
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+
+  input.dispatch(trusted.tap());
+  assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY");
+  assert.equal(log.at(-1), "wake");
+});
+
+test("LX6. a synchronous throw from the hook is reported through onError and the timeline still completes (Habitat, World, wake)", () => {
+  const boom = new Error("hook threw");
+  const { time, input, lifecycle, errors, phases, calls } = harness({
+    ordering: true,
+    onContextExpired: () => {
+      throw boom;
+    },
+  });
+  input.dispatch(trusted.tap());
+  time.advanceBy(300_000);
+
+  assert.deepEqual(errors, [boom]);
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+  assert.deepEqual(phases.slice(-2), ["CONTEXT_EXPIRED", "HABITAT_IDLE"]);
+  assert.equal(calls.returnToWorld, 1, "the existing Habitat behaviour is untouched by a failing hook");
+  input.dispatch(trusted.tap());
+  assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY", "and it still wakes");
+});
+
+test("LX7. a rejection - or a thenable that throws - is reported (never unhandled), and only asynchronously", async () => {
+  const unhandled = watchUnhandled();
+  try {
+    for (const make of [
+      () => Promise.reject(new Error("rejected")),
+      () => Promise.reject(undefined),
+      () => Promise.reject("just a string"),
+      () => ({ then: () => { throw new Error("thenable threw"); } }) as unknown as Promise<void>,
+    ]) {
+      const { time, input, errors, lifecycle } = harness({ onContextExpired: make });
+      input.dispatch(trusted.tap());
+      time.advanceBy(300_000);
+      assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+      assert.equal(errors.length, 0, "not reported synchronously: the hook is not awaited");
+      await flushMicrotasks();
+      assert.equal(errors.length, 1, "reported once, through onError");
+    }
+    await flushMicrotasks();
+  } finally {
+    unhandled.stop();
+  }
+  assert.deepEqual(unhandled.seen, [], "no unhandled rejection");
+});
+
+test("LX8. the hook is called with ZERO arguments: nothing about the transition, the phase, the snapshot or the Domain is handed over", () => {
+  const argCounts: number[] = [];
+  const { time, input } = harness({
+    onContextExpired: function () {
+      // eslint-disable-next-line prefer-rest-params
+      argCounts.push(arguments.length);
+    },
+  });
+  input.dispatch(trusted.tap());
+  time.advanceBy(300_000);
+  assert.deepEqual(argCounts, [0]);
+});
+
+test("LX9. never after dispose: disposed before, disposed INSIDE onPhase(CONTEXT_EXPIRED), and disposed before a late input", () => {
+  // (a) disposed before the expiry.
+  {
+    let calls = 0;
+    const { time, input, lifecycle } = harness({ onContextExpired: () => void (calls += 1) });
+    input.dispatch(trusted.tap());
+    lifecycle.dispose();
+    time.advanceBy(3_600_000);
+    assert.equal(calls, 0);
+  }
+  // (b) disposed by the very phase callback that announces CONTEXT_EXPIRED: the timer only checks
+  //     its own flag between transitions, so the lifecycle itself must refuse to call the hook.
+  {
+    const hookCalls: string[] = [];
+    let lifecycle: ReturnType<typeof createExperienceLifecycle>;
+    const time = createFakeTime();
+    const input = createFakeInputTarget();
+    lifecycle = createExperienceLifecycle({
+      clock: time.clock,
+      scheduler: time.scheduler,
+      inputTarget: input.target,
+      snapshots: { getSnapshot: () => IDLE_READY },
+      presentation: { returnToWorld: () => void hookCalls.push("returnToWorld") },
+      world: { isOrdering: () => true },
+      onPhase: (phase) => {
+        hookCalls.push(`phase:${phase}`);
+        if (phase === "CONTEXT_EXPIRED") lifecycle.dispose();
+      },
+      onContextExpired: () => void hookCalls.push("HOOK"),
+    });
+    lifecycle.start();
+    input.dispatch(trusted.tap());
+    hookCalls.length = 0;
+    time.advanceBy(300_000);
+    assert.equal(hookCalls.includes("HOOK"), false, "no hook after a dispose made by onPhase(CONTEXT_EXPIRED)");
+    assert.equal(hookCalls.includes("returnToWorld"), false, "and nothing else of the disposed timeline ran");
+  }
+  // (c) disposed, then a late input arrives: the input is ignored, so no expiry is evaluated.
+  {
+    let calls = 0;
+    const { time, input, lifecycle } = harness({ onContextExpired: () => void (calls += 1) });
+    input.dispatch(trusted.tap());
+    time.jumpBy(600_000);
+    lifecycle.dispose();
+    input.dispatch(trusted.tap());
+    time.fireDue();
+    assert.equal(calls, 0);
+  }
+  // (d) disposing FROM the hook itself is safe, and the hook still fired exactly once.
+  {
+    let calls = 0;
+    let lifecycle: ReturnType<typeof createExperienceLifecycle>;
+    const time = createFakeTime();
+    const input = createFakeInputTarget();
+    lifecycle = createExperienceLifecycle({
+      clock: time.clock,
+      scheduler: time.scheduler,
+      inputTarget: input.target,
+      snapshots: { getSnapshot: () => IDLE_READY },
+      presentation: { returnToWorld: () => {} },
+      world: { isOrdering: () => false },
+      onContextExpired: () => {
+        calls += 1;
+        lifecycle.dispose();
+      },
+    });
+    lifecycle.start();
+    input.dispatch(trusted.tap());
+    time.advanceBy(300_000);
+    time.advanceBy(3_600_000);
+    assert.equal(calls, 1);
+  }
+});
+
+test("LX10. an expired context leaves the rest of the lifecycle exactly as it was: same phases, same wakes, same returnToWorld with or without a hook", () => {
+  const run = (hook: (() => void) | undefined) => {
+    const { time, input, phases, wakes, calls, lifecycle } = harness({ ordering: true, onContextExpired: hook });
+    input.dispatch(trusted.tap());
+    time.advanceBy(300_000);
+    input.dispatch(trusted.tap());
+    time.advanceBy(300_000);
+    return JSON.stringify({ phases, wakes, returnToWorld: calls.returnToWorld, reads: calls.getSnapshot, phase: lifecycle.getPhase() });
+  };
+  assert.equal(run(() => {}), run(undefined));
+});
+
+test("LX11. the lifecycle itself reads no Domain snapshot at expiry (its only reads are the wakes'), whatever the hook does", () => {
+  const { time, input, calls } = harness({ onContextExpired: () => {} });
+  input.dispatch(trusted.tap()); // wake: 1 read
+  const reads = calls.getSnapshot;
+  time.advanceBy(300_000); // expiry: 0 reads by the lifecycle
+  assert.equal(calls.getSnapshot, reads);
+});
+
+test("LX12. a hook that returns something odd, and an onError that itself throws, break nothing", () => {
+  for (const value of [1, "x", null, undefined, {}, { then: 5 }]) {
+    const { time, input, lifecycle } = harness({ onContextExpired: (() => value) as never });
+    input.dispatch(trusted.tap());
+    time.advanceBy(300_000);
+    assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+  }
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  const lifecycle = createExperienceLifecycle({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    inputTarget: input.target,
+    snapshots: { getSnapshot: () => IDLE_READY },
+    presentation: { returnToWorld: () => {} },
+    world: { isOrdering: () => false },
+    onContextExpired: () => {
+      throw new Error("hook");
+    },
+    onError: () => {
+      throw new Error("the error hook itself is broken");
+    },
+  });
+  lifecycle.start();
+  input.dispatch(trusted.tap());
+  assert.doesNotThrow(() => time.advanceBy(300_000));
+  assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
+});
+
+test("LX13. when the hook runs the lifecycle is already resting in HABITAT_IDLE, and re-entering the lifecycle from the hook is safe", () => {
+  const seen: string[] = [];
+  let lifecycle: ReturnType<typeof createExperienceLifecycle>;
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  lifecycle = createExperienceLifecycle({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    inputTarget: input.target,
+    snapshots: { getSnapshot: () => IDLE_READY },
+    presentation: { returnToWorld: () => {} },
+    world: { isOrdering: () => false },
+    onContextExpired: () => {
+      seen.push(lifecycle.getPhase());
+      seen.push(String(lifecycle.consumeGesture()));
+    },
+  });
+  lifecycle.start();
+  input.dispatch(trusted.tap());
+  time.advanceBy(300_000);
+  assert.deepEqual(seen, ["HABITAT_IDLE", "null"]);
 });

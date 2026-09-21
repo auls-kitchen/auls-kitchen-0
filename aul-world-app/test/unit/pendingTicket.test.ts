@@ -8,7 +8,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
-import { classifyPending, hasPendingTicket, routeCustomerReturn } from "../../src/experience/pendingTicket.ts";
+import { classifyPending, hasPendingTicket, releasePlanFor, routeCustomerReturn } from "../../src/experience/pendingTicket.ts";
 import type { ExperienceSnapshotView } from "../../src/contracts.ts";
 import {
   ITEM,
@@ -224,4 +224,169 @@ test("F3. routing only reads: the Domain state is identical before and after", a
   for (let i = 0; i < 5; i++) routeCustomerReturn(orchestrator.getSnapshot());
   assert.equal(JSON.stringify(orchestrator.getSnapshot()), before);
   assert.equal(orchestrator.getSnapshot().session, "awaiting_outcome");
+});
+
+// ============================================================
+// U4 Slice 2B, S3: releasePlanFor - what an expiry may ask the Domain to do
+// ============================================================
+//
+// RELEASE / NONE_TO_RELEASE / PROTECTED / NOT_READY. Pure and read-only. Checked twice:
+// against hand-built snapshots (the whole table, including malformed ones) and against
+// the REAL Kiosk Domain driven into each state - so it also pins the contract with the
+// real ExperienceSnapshot shape (`session`, `cart.lines`, `order.status`).
+
+function snap(session: string, lines: number, status: string, ready = true): ExperienceSnapshotView {
+  return {
+    ready,
+    session,
+    cart: { lines: Array.from({ length: lines }, () => ({})) },
+    order: { status },
+    degraded: null,
+  } as unknown as ExperienceSnapshotView;
+}
+
+test("RP1. ACTIVE with an empty Cart, ACTIVE with Cart lines, and CONFIRMATION are RELEASE", () => {
+  assert.equal(releasePlanFor(snap("active", 0, "NONE")), "RELEASE", "ACTIVE + empty Cart (name/notes/session are still customer context)");
+  assert.equal(releasePlanFor(snap("active", 1, "NONE")), "RELEASE");
+  assert.equal(releasePlanFor(snap("active", 5, "DECLINED")), "RELEASE", "a rejection leaves ACTIVE with the Cart kept");
+  assert.equal(releasePlanFor(snap("confirmation", 1, "CONFIRMED")), "RELEASE");
+  assert.equal(releasePlanFor(snap("confirmation", 0, "CONFIRMED")), "RELEASE");
+});
+
+test("RP2. UNKNOWN, AWAITING_OUTCOME and any pending/uncertain order are PROTECTED", () => {
+  assert.equal(releasePlanFor(snap("awaiting_outcome", 1, "UNCERTAIN")), "PROTECTED", "UNKNOWN");
+  assert.equal(releasePlanFor(snap("awaiting_outcome", 1, "NONE")), "PROTECTED", "a submit still in flight (order still NONE)");
+  assert.equal(releasePlanFor(snap("awaiting_outcome", 0, "PENDING")), "PROTECTED");
+  assert.equal(releasePlanFor(snap("active", 1, "UNCERTAIN")), "PROTECTED", "an uncertain order on an otherwise active session");
+  assert.equal(releasePlanFor(snap("active", 0, "PENDING")), "PROTECTED");
+  assert.equal(releasePlanFor(snap("confirmation", 1, "UNCERTAIN")), "PROTECTED", "a confirmation-looking session whose order is unresolved");
+  assert.equal(releasePlanFor(snap("idle", 0, "UNCERTAIN")), "PROTECTED");
+});
+
+test("RP3. an idle session is NONE_TO_RELEASE", () => {
+  assert.equal(releasePlanFor(snap("idle", 0, "NONE")), "NONE_TO_RELEASE");
+  assert.equal(releasePlanFor(snap("idle", 0, "CONFIRMED")), "NONE_TO_RELEASE");
+});
+
+test("RP4. anything malformed or unreadable is NOT_READY - never RELEASE, never NONE_TO_RELEASE", () => {
+  const hostile = {
+    get ready(): boolean {
+      throw new Error("hostile getter");
+    },
+  };
+  const hostileSession = { ready: true, cart: { lines: [] }, order: { status: "NONE" }, get session(): string { throw new Error("hostile session"); } };
+  const bad: unknown[] = [
+    null,
+    undefined,
+    "active",
+    42,
+    [],
+    {},
+    snap("active", 1, "NONE", false), // not ready
+    snap("weird", 1, "NONE"),
+    snap("", 1, "NONE"),
+    { ready: true, session: "active", cart: { lines: "x" }, order: { status: "NONE" } },
+    { ready: true, session: "active", cart: { lines: [] } },
+    { ready: true, session: "active", order: { status: "NONE" } },
+    { ready: "true", session: "active", cart: { lines: [] }, order: { status: "NONE" } },
+    { ready: true, session: undefined, cart: { lines: [] }, order: { status: "NONE" } },
+    hostile,
+    hostileSession,
+    new Proxy({}, { get() { throw new Error("hostile proxy"); } }),
+  ];
+  bad.forEach((value, index) => {
+    assert.doesNotThrow(() => releasePlanFor(value as ExperienceSnapshotView), `bad[${index}] must not throw`);
+    assert.equal(releasePlanFor(value as ExperienceSnapshotView), "NOT_READY", `bad[${index}]`);
+  });
+});
+
+test("RP5. the plan agrees with classifyPending: it never RELEASES what classifyPending calls UNRESOLVED, and only releases ACTIVE / CONFIRMATION sessions", () => {
+  for (const session of ["idle", "active", "awaiting_outcome", "confirmation"]) {
+    for (const lines of [0, 1, 3]) {
+      for (const status of ["NONE", "PENDING", "UNCERTAIN", "CONFIRMED", "DECLINED"]) {
+        const snapshot = snap(session, lines, status);
+        const plan = releasePlanFor(snapshot);
+        if (classifyPending(snapshot) === "UNRESOLVED") assert.equal(plan, "PROTECTED", `${session}/${lines}/${status}`);
+        if (plan === "RELEASE") assert.ok(session === "active" || session === "confirmation", `${session}/${lines}/${status}`);
+        if (session === "idle" && plan !== "PROTECTED") assert.equal(plan, "NONE_TO_RELEASE", `${session}/${lines}/${status}`);
+      }
+    }
+  }
+});
+
+test("RP6. pure: frozen input accepted and never mutated, a constant returned, the same answer every time", () => {
+  const frozen = Object.freeze({ ready: true, session: "active", cart: Object.freeze({ lines: Object.freeze([{}]) }), order: Object.freeze({ status: "NONE" }), degraded: null });
+  for (let i = 0; i < 3; i++) assert.equal(releasePlanFor(frozen as unknown as ExperienceSnapshotView), "RELEASE");
+  const written: string[] = [];
+  const watched = new Proxy(structuredClone(frozen), {
+    set: (_t, p) => { written.push(String(p)); return false; },
+    defineProperty: (_t, p) => { written.push(String(p)); return false; },
+    deleteProperty: (_t, p) => { written.push(String(p)); return false; },
+  });
+  releasePlanFor(watched as unknown as ExperienceSnapshotView);
+  assert.deepEqual(written, []);
+  assert.equal(typeof releasePlanFor(frozen as unknown as ExperienceSnapshotView), "string");
+});
+
+test("RP7. against the REAL Kiosk Domain: fresh -> NONE_TO_RELEASE, ACTIVE Cart -> RELEASE, ACTIVE empty -> RELEASE, CONFIRMATION -> RELEASE", async () => {
+  const notHydrated = createKioskHostFixture(succeedingCallable());
+  assert.equal(releasePlanFor(notHydrated.orchestrator.getSnapshot()), "NOT_READY", "before hydration");
+
+  const fresh = await readyFixture();
+  assert.equal(releasePlanFor(fresh.orchestrator.getSnapshot()), "NONE_TO_RELEASE");
+
+  const withCart = await readyFixture();
+  withCart.orchestrator.addItem(ITEM);
+  assert.equal(releasePlanFor(withCart.orchestrator.getSnapshot()), "RELEASE");
+
+  const emptyActive = await readyFixture();
+  emptyActive.orchestrator.addItem(ITEM);
+  emptyActive.orchestrator.clearCart();
+  assert.equal(emptyActive.orchestrator.getSnapshot().session, "active");
+  assert.equal(releasePlanFor(emptyActive.orchestrator.getSnapshot()), "RELEASE", "the trap: classifyPending calls this NONE, but it IS customer context");
+
+  const confirmed = await readyFixture(succeedingCallable());
+  confirmed.orchestrator.addItem(ITEM);
+  await confirmed.orchestrator.submit();
+  assert.equal(releasePlanFor(confirmed.orchestrator.getSnapshot()), "RELEASE");
+});
+
+test("RP8. against the REAL Kiosk Domain: UNKNOWN and a submit still in flight are PROTECTED, and a rejected submit is RELEASE", async () => {
+  const unknown = await readyFixture(unknownCallable());
+  unknown.orchestrator.addItem(ITEM);
+  await unknown.orchestrator.submit();
+  assert.equal(releasePlanFor(unknown.orchestrator.getSnapshot()), "PROTECTED");
+
+  const deferred = createDeferredCallable();
+  const inFlight = await readyFixture(deferred.callable);
+  inFlight.orchestrator.addItem(ITEM);
+  const pendingSubmit = inFlight.orchestrator.submit();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(releasePlanFor(inFlight.orchestrator.getSnapshot()), "PROTECTED", "AWAITING_OUTCOME with the order still reading NONE");
+  deferred.release();
+  await pendingSubmit;
+
+  const rejected = await readyFixture(rejectingCallable());
+  rejected.orchestrator.addItem(ITEM);
+  await rejected.orchestrator.submit();
+  assert.equal(rejected.orchestrator.getSnapshot().session, "active");
+  assert.equal(releasePlanFor(rejected.orchestrator.getSnapshot()), "RELEASE");
+});
+
+test("RP9. the plan only reads: the real Domain is identical before and after any number of calls", async () => {
+  const { orchestrator } = await readyFixture(unknownCallable());
+  orchestrator.addItem(ITEM);
+  await orchestrator.submit();
+  const before = JSON.stringify(orchestrator.getSnapshot());
+  for (let i = 0; i < 5; i++) releasePlanFor(orchestrator.getSnapshot());
+  assert.equal(JSON.stringify(orchestrator.getSnapshot()), before);
+});
+
+test("RP10. classifyPending and routeCustomerReturn are untouched by S3: the same answers as before for every state", () => {
+  assert.equal(classifyPending(snap("active", 0, "NONE")), "NONE");
+  assert.equal(classifyPending(snap("active", 1, "NONE")), "ACTIVE_CART");
+  assert.equal(classifyPending(snap("confirmation", 1, "CONFIRMED")), "CONFIRMATION");
+  assert.equal(classifyPending(snap("awaiting_outcome", 1, "UNCERTAIN")), "UNRESOLVED");
+  assert.deepEqual({ ...routeCustomerReturn(snap("confirmation", 1, "CONFIRMED")) }, { route: "OWNERSHIP_CONFIRMATION", pending: "CONFIRMATION" });
+  assert.deepEqual({ ...routeCustomerReturn(snap("idle", 0, "NONE")) }, { route: "DISCOVER_MENU", pending: "NONE" });
 });

@@ -7,8 +7,10 @@
 // nothing, clears nothing, routes nothing - so every test also asserts the
 // Domain is exactly as the previous customer left it. The Composition sees the
 // Domain only through a proxied port that records every access and throws on
-// any capability outside the four it may use, so `violations: []` proves there
-// was no release call (or any other Domain call) at all.
+// any capability outside the five it may use, and counts the guarded release
+// (`releaseCustomerContext`, used by the 5-minute expiry only - see expiry.spec.ts),
+// so the zero release count and `violations: []` prove a Home activation made no
+// release call (or any other Domain call) at all.
 
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
@@ -52,11 +54,12 @@ const withUnknown = (page: Page) => () =>
     await api.domain.submit();
   });
 
-// Nothing about a Home activation touched the Domain: only the four allowed
-// Composition calls exist, no identity change, and no extra order call.
+// Nothing about a Home activation touched the Domain: only the allowed Composition
+// calls exist, never the release, no identity change, and no extra order call.
 async function expectNoDomainEffect(page: Page, orderIntentCalls: number, snapshotReads: number): Promise<void> {
   const c = await counters(page);
   expect(c.violations).toEqual([]);
+  expect(c.portCalls.releaseCustomerContext).toBe(0);
   expect(c.signInCalls).toBe(1);
   expect(c.signOutCalls).toBe(0);
   expect(c.orderIntentCalls).toBe(orderIntentCalls);
@@ -349,19 +352,28 @@ test("X16. Home exposes no business state: its shell hooks carry no decision, ti
   }
 });
 
-test("X17. the shell has exactly two buttons, and pressing either changes nothing in the Domain", async ({ page }) => {
+test("X17. the shell has exactly two buttons, pressing either changes nothing in the Domain and releases nothing - only the 5-minute expiry releases", async ({ page }) => {
   await arrive(page, withCart(page));
   const before = await domain(page);
   const buttons = page.locator("[data-experience-shell] button");
   expect(await buttons.evaluateAll((elements) => elements.map((e) => e.getAttribute("data-shell-action")))).toEqual(["menu", "home"]);
 
+  // Before the expiry: neither button touches the Domain, and neither releases.
   await page.locator("[data-shell-action=menu]").click({ force: true });
   await pressHome(page);
+  expect(await domain(page)).toEqual(before);
+  expect((await counters(page)).portCalls.releaseCustomerContext).toBe(0);
+
+  // Across the 5-minute expiry (U4 S3): the Domain here is releasable (ACTIVE + Cart), so the
+  // expiry - and only the expiry - starts exactly one release. That is the S3 effect; the old
+  // "the Domain is untouched after 5 minutes" no longer holds, by design.
   await advance(page, 300_000);
+  expect(await phase(page)).toBe("HABITAT_IDLE");
+  await expect.poll(() => domain(page)).toMatchObject({ session: "idle", cartLines: 0 });
   await tapWorld(page, AWR.emptySpace);
 
-  expect(await domain(page)).toEqual(before);
   const c = await counters(page);
+  expect(c.portCalls.releaseCustomerContext).toBe(1); // one, from the expiry: the return added none
   expect(c.violations).toEqual([]);
   expect(c.orderIntentCalls).toBe(0);
   expect(c.signOutCalls).toBe(0);

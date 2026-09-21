@@ -3,8 +3,8 @@
 // IndexedDB): pending-ticket routing on return from Habitat, UNKNOWN staying
 // protected, Domain events settling while nobody is at the kiosk, and the
 // Domain's boot failure paths. The Composition only ever sees a proxied port
-// that records every access and throws on any capability outside the four it
-// is allowed.
+// that records every access and throws on any capability outside the five it
+// is allowed (the last one, the guarded release, is used by the 5-minute expiry only).
 
 import { test, expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
@@ -25,11 +25,23 @@ const u3 = <T,>(page: Page, run: (api: any) => T | Promise<T>) => page.evaluate(
 // A customer arrives (real touch), the Domain is put into some state by the
 // customer's actions, the kiosk goes silent for the full 5 minutes into
 // Habitat, and the customer returns (real touch).
-async function customerLeavesAndReturns(page: Page, customerActions: () => Promise<void>): Promise<void> {
+//
+// U4 S3: the 5-minute expiry now starts ONE guarded release of a releasable
+// customer context (ACTIVE / CONFIRMATION). What the returning customer then
+// finds depends on how that release ended, so a test says which case it means:
+//   "refuse" - the release is answered as REFUSED in place of the Domain, which
+//              stays exactly as the customer left it: what these tests pin is how a
+//              PENDING ticket routes, and that is unchanged (S4 owns what happens next);
+//   "settle" - the REAL release runs, and the customer returns only after it finished
+//              (a wait for the outcome, never for a duration).
+// UNKNOWN / AWAITING_OUTCOME / idle are never released, so they need neither.
+async function customerLeavesAndReturns(page: Page, customerActions: () => Promise<void>, release?: "refuse" | "settle"): Promise<void> {
   await tapWorld(page, AWR.emptySpace); // arrives
   await customerActions();
+  if (release === "refuse") await u3(page, (api) => api.setReleaseMode("refuse"));
   await advance(page, 300_000);
   expect(await phase(page)).toBe("HABITAT_IDLE");
+  if (release === "settle") await expect.poll(() => domain(page)).toMatchObject({ session: "idle", cartLines: 0 });
   await tapWorld(page, AWR.emptySpace); // returns
 }
 
@@ -49,12 +61,12 @@ test("R1. no pending ticket -> the returning customer goes to Discover/Menu", as
   expect(await attribute(page, "data-view")).toBe("discover");
 });
 
-test("R2. ACTIVE + cart lines -> pending: the cart survives Habitat and the return is routed to ownership", async ({ page }) => {
+test("R2. ACTIVE + cart lines -> pending: a cart still in the Domain at the return is routed to ownership (the expiry's release refused)", async ({ page }) => {
   await mount(page);
   await freezeTime(page);
   await customerLeavesAndReturns(page, async () => {
     await u3(page, (api) => api.domain.addItem());
-  });
+  }, "refuse");
 
   expect((await events(page)).wakes[1]).toEqual({ route: "OWNERSHIP_CONFIRMATION", pending: "ACTIVE_CART" });
   expect(await attribute(page, "data-view")).toBe("ownership");
@@ -70,13 +82,13 @@ test("R3. ACTIVE + EMPTY cart is NOT a pending ticket (clearCart leaves the sess
       api.domain.addItem();
       api.domain.clearCart();
     });
-  });
+  }, "refuse");
 
   expect(await domain(page)).toMatchObject({ session: "active", cartLines: 0 });
   expect((await events(page)).wakes[1]).toEqual({ route: "DISCOVER_MENU", pending: "NONE" });
 });
 
-test("R4. CONFIRMATION -> pending: the confirmed order survives Habitat", async ({ page }) => {
+test("R4. CONFIRMATION -> pending: a confirmed order still in the Domain at the return is routed to ownership (the expiry's release refused)", async ({ page }) => {
   await mount(page);
   await freezeTime(page);
   await customerLeavesAndReturns(page, async () => {
@@ -85,7 +97,7 @@ test("R4. CONFIRMATION -> pending: the confirmed order survives Habitat", async 
       api.domain.addItem();
       await api.domain.submit();
     });
-  });
+  }, "refuse");
 
   expect((await events(page)).wakes[1]).toEqual({ route: "OWNERSHIP_CONFIRMATION", pending: "CONFIRMATION" });
   expect(await domain(page)).toMatchObject({ session: "confirmation", orderStatus: "CONFIRMED", cartLines: 1 });
@@ -277,20 +289,22 @@ test("D1. an in-flight order settles while the kiosk is in Habitat: the Experien
 // Composition authority over the Domain
 // ============================================================
 
-test("A1. across boot, wake, all three thresholds, Habitat and return the Composition touches only its four allowed Domain calls", async ({ page }) => {
+test("A1. across boot, wake, all three thresholds, Habitat and return the Composition touches only its five allowed Domain calls", async ({ page }) => {
   await mount(page);
   await freezeTime(page);
   await customerLeavesAndReturns(page, async () => {
     await u3(page, (api) => api.domain.addItem());
-  });
+  }, "settle");
 
   const c = await counters(page);
   expect(c.violations).toEqual([]); // any other Domain capability would have thrown and been recorded
   expect(c.portCalls.beginCustomerSession).toBe(1); // once, at mount, never by a timer
   expect(c.portCalls.subscribe).toBe(1);
   expect(c.activeDomainSubscriptions).toBe(1);
-  // getSnapshot: exactly one per wake (2 wakes), none from timers.
-  expect(c.portCalls.getSnapshot).toBe(2);
+  // getSnapshot: one per wake (2 wakes) and the ONE the 5-minute expiry reads - none from the other timers.
+  expect(c.portCalls.getSnapshot).toBe(3);
+  // The release seam: used once, by the expiry, and by nothing else.
+  expect(c.portCalls.releaseCustomerContext).toBe(1);
   expect(c.orderIntentCalls).toBe(0);
   expect(c.signOutCalls).toBe(0);
 });

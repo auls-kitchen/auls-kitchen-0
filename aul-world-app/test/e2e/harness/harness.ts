@@ -5,8 +5,10 @@
 //
 // The Composition is handed a PROXIED host port: every access is counted, and
 // any property outside {orchestrator.getSnapshot, orchestrator.subscribe,
-// beginCustomerSession, getBootstrapStatus} throws and is recorded, so the e2e
-// can prove the Composition never reaches any other Domain capability.
+// orchestrator.releaseCustomerContext, beginCustomerSession, getBootstrapStatus}
+// throws and is recorded, so the e2e can prove the Composition never reaches any
+// other Domain capability - and counts every release call, so it can prove WHEN
+// (and, for UNKNOWN, that it never) the one release seam is used.
 
 import { instrument } from "./instrument.ts"; // MUST stay the first import.
 import { mountAulWorld } from "../../../src/composition/compositionRoot.ts";
@@ -135,7 +137,7 @@ let wakes: Array<{ route: string; pending: string }> = [];
 let homeDecisions: string[] = [];
 let errors: string[] = [];
 let violations: string[] = [];
-let portCalls = { getSnapshot: 0, subscribe: 0, beginCustomerSession: 0, getBootstrapStatus: 0 };
+let portCalls = { getSnapshot: 0, subscribe: 0, beginCustomerSession: 0, getBootstrapStatus: 0, releaseCustomerContext: 0 };
 let activeDomainSubscriptions = 0;
 const timers = { pending: new Set<number>(), sets: 0, clears: 0 };
 
@@ -169,6 +171,13 @@ const scheduler = {
 };
 const clock = { now: (): number => performance.now() };
 
+// TEST-ONLY control of what the Composition's ONE release call does. "real" passes it
+// to the real Domain; the others answer in place of it (the Domain is then untouched),
+// so a test can prove the Composition neither depends on nor presents the verdict.
+type ReleaseMode = "real" | "refuse" | "throw" | "reject" | "garbage" | "hold";
+// snapshotThrows makes the port's ONE snapshot read fail (an unreadable Domain).
+const releaseControl = { mode: "real" as ReleaseMode, held: [] as Array<() => void>, snapshotThrows: false };
+
 function buildPort(host: any) {
   const orchestrator = host.orchestrator;
   return guard(
@@ -177,11 +186,32 @@ function buildPort(host: any) {
     {
       orchestrator: guard(
         "host.orchestrator",
-        ["getSnapshot", "subscribe"],
+        ["getSnapshot", "subscribe", "releaseCustomerContext"],
         {
           getSnapshot() {
             portCalls.getSnapshot += 1;
+            if (releaseControl.snapshotThrows) throw new Error("test snapshot unreadable");
             return orchestrator.getSnapshot();
+          },
+          releaseCustomerContext(): Promise<unknown> {
+            portCalls.releaseCustomerContext += 1;
+            switch (releaseControl.mode) {
+              case "real":
+                return orchestrator.releaseCustomerContext();
+              case "refuse":
+                return Promise.resolve({ outcome: "REFUSED", reason: "OUTCOME_UNRESOLVED", fromState: "ACTIVE", callLog: ["guard"] });
+              case "throw":
+                throw new Error("test release threw synchronously");
+              case "reject":
+                return Promise.reject(new Error("test release rejected"));
+              case "garbage":
+                return Promise.resolve("garbage");
+              case "hold":
+                // Pending until releaseHeld(); then it runs the REAL release.
+                return new Promise((resolve) => {
+                  releaseControl.held.push(() => resolve(orchestrator.releaseCustomerContext()));
+                });
+            }
           },
           subscribe(listener: (event: { type: string }) => void) {
             portCalls.subscribe += 1;
@@ -221,7 +251,10 @@ async function mount(options: { thresholds?: { spaceGivenMs: number; releasedMs:
   violations = [];
   held.on = false;
   held.callbacks.clear();
-  portCalls = { getSnapshot: 0, subscribe: 0, beginCustomerSession: 0, getBootstrapStatus: 0 };
+  releaseControl.mode = "real";
+  releaseControl.held.length = 0;
+  releaseControl.snapshotThrows = false;
+  portCalls = { getSnapshot: 0, subscribe: 0, beginCustomerSession: 0, getBootstrapStatus: 0, releaseCustomerContext: 0 };
   activeDomainSubscriptions = 0;
 
   currentHost = createBrowserKiosk({
@@ -295,6 +328,19 @@ const api = {
     held.on = false;
     for (const callback of callbacks) callback();
     return callbacks.length;
+  },
+
+  // What the Composition's one release call does (see ReleaseMode), and letting a held one run.
+  setReleaseMode(mode: ReleaseMode): void {
+    releaseControl.mode = mode;
+  },
+  failSnapshots(on: boolean): void {
+    releaseControl.snapshotThrows = on;
+  },
+  releaseHeld(): number {
+    const pending = releaseControl.held.splice(0);
+    for (const run of pending) run();
+    return pending.length;
   },
 
   // fake back end
