@@ -22,6 +22,10 @@ test.afterEach(async () => {
 
 const u3 = <T,>(page: Page, run: (api: any) => T | Promise<T>) => page.evaluate(`(${run.toString()})(window.__u3)`) as Promise<T>;
 
+// U4 S4a: the shell has no pending-ticket hook at all (the attribute is absent, not blank).
+const expectNoPendingAttribute = async (page: Page) =>
+  expect(await page.locator("[data-experience-shell]").getAttribute("data-pending")).toBeNull();
+
 // A customer arrives (real touch), the Domain is put into some state by the
 // customer's actions, the kiosk goes silent for the full 5 minutes into
 // Habitat, and the customer returns (real touch).
@@ -61,20 +65,20 @@ test("R1. no pending ticket -> the returning customer goes to Discover/Menu", as
   expect(await attribute(page, "data-view")).toBe("discover");
 });
 
-test("R2. ACTIVE + cart lines -> pending: a cart still in the Domain at the return is routed to ownership (the expiry's release refused)", async ({ page }) => {
+test("R2. ACTIVE + cart lines: a cart still in the Domain at the return (the expiry's release refused) fails closed to the neutral unavailable route - never an ownership question", async ({ page }) => {
   await mount(page);
   await freezeTime(page);
   await customerLeavesAndReturns(page, async () => {
     await u3(page, (api) => api.domain.addItem());
   }, "refuse");
 
-  expect((await events(page)).wakes[1]).toEqual({ route: "OWNERSHIP_CONFIRMATION", pending: "ACTIVE_CART" });
-  expect(await attribute(page, "data-view")).toBe("ownership");
-  expect(await attribute(page, "data-pending")).toBe("ACTIVE_CART");
+  expect((await events(page)).wakes[1]).toEqual({ route: "UNAVAILABLE_NEUTRAL", pending: "ACTIVE_CART" });
+  expect(await attribute(page, "data-view")).toBe("unavailable");
+  await expectNoPendingAttribute(page); // the previous customer's ticket kind is never rendered
   expect(await domain(page)).toMatchObject({ session: "active", cartLines: 1, orderStatus: "NONE" });
 });
 
-test("R3. ACTIVE + EMPTY cart is NOT a pending ticket (clearCart leaves the session active)", async ({ page }) => {
+test("R3. ACTIVE + EMPTY cart (clearCart leaves the session active) is still a releasable context: with the release refused it fails closed, never a guessed Discover", async ({ page }) => {
   await mount(page);
   await freezeTime(page);
   await customerLeavesAndReturns(page, async () => {
@@ -85,10 +89,11 @@ test("R3. ACTIVE + EMPTY cart is NOT a pending ticket (clearCart leaves the sess
   }, "refuse");
 
   expect(await domain(page)).toMatchObject({ session: "active", cartLines: 0 });
-  expect((await events(page)).wakes[1]).toEqual({ route: "DISCOVER_MENU", pending: "NONE" });
+  expect((await events(page)).wakes[1]).toEqual({ route: "UNAVAILABLE_NEUTRAL", pending: "NONE" });
+  expect(await attribute(page, "data-view")).toBe("unavailable");
 });
 
-test("R4. CONFIRMATION -> pending: a confirmed order still in the Domain at the return is routed to ownership (the expiry's release refused)", async ({ page }) => {
+test("R4. CONFIRMATION: a confirmed order still in the Domain at the return (the expiry's release refused) fails closed to the neutral unavailable route", async ({ page }) => {
   await mount(page);
   await freezeTime(page);
   await customerLeavesAndReturns(page, async () => {
@@ -99,7 +104,8 @@ test("R4. CONFIRMATION -> pending: a confirmed order still in the Domain at the 
     });
   }, "refuse");
 
-  expect((await events(page)).wakes[1]).toEqual({ route: "OWNERSHIP_CONFIRMATION", pending: "CONFIRMATION" });
+  expect((await events(page)).wakes[1]).toEqual({ route: "UNAVAILABLE_NEUTRAL", pending: "CONFIRMATION" });
+  expect(await attribute(page, "data-view")).toBe("unavailable");
   expect(await domain(page)).toMatchObject({ session: "confirmation", orderStatus: "CONFIRMED", cartLines: 1 });
 });
 
@@ -157,8 +163,9 @@ test("U1. UNKNOWN through 5 minutes, Habitat and the customer's return: nothing 
     });
   });
 
-  expect((await events(page)).wakes[1]).toEqual({ route: "OWNERSHIP_CONFIRMATION", pending: "UNRESOLVED" });
-  expect(await attribute(page, "data-pending")).toBe("UNRESOLVED");
+  expect((await events(page)).wakes[1]).toEqual({ route: "PROTECTED_NEUTRAL", pending: "UNRESOLVED" });
+  expect(await attribute(page, "data-view")).toBe("protected");
+  await expectNoPendingAttribute(page);
 
   // The Domain is exactly as the customer left it.
   expect(await domain(page)).toEqual({
@@ -189,7 +196,7 @@ test("U2. the shell offers no Domain action at all: nothing can reset, clear, re
       await api.domain.submit();
     });
   });
-  expect(await attribute(page, "data-view")).toBe("ownership");
+  expect(await attribute(page, "data-view")).toBe("protected");
 
   // The shell has exactly two controls: Menu (asks AWR for its menu) and Home/X
   // (a customer-intent control that only reports the phase before the press).
@@ -234,7 +241,7 @@ test("U3. UNKNOWN survives a full dispose and remount: the persisted attempt is 
 
   expect(await domain(page)).toMatchObject({ ready: true, session: "awaiting_outcome", orderStatus: "UNCERTAIN" });
   await tapWorld(page, AWR.emptySpace);
-  expect((await events(page)).wakes).toEqual([{ route: "OWNERSHIP_CONFIRMATION", pending: "UNRESOLVED" }]);
+  expect((await events(page)).wakes).toEqual([{ route: "PROTECTED_NEUTRAL", pending: "UNRESOLVED" }]);
 
   const c = await counters(page);
   expect(c.orderIntentCalls).toBe(0); // hydration never retries
@@ -282,7 +289,9 @@ test("D1. an in-flight order settles while the kiosk is in Habitat: the Experien
   expect((await counters(page)).portCalls.getSnapshot).toBe(readsBefore);
 
   await tapWorld(page, AWR.emptySpace);
-  expect((await events(page)).wakes.at(-1)).toEqual({ route: "OWNERSHIP_CONFIRMATION", pending: "CONFIRMATION" });
+  // The order settled AFTER the expiry, so the return finds a CONFIRMATION nobody has released. With no verdict the
+  // lifecycle's routing is the fail-closed neutral route (reconciling it is a later slice): never an ownership question.
+  expect((await events(page)).wakes.at(-1)).toEqual({ route: "UNAVAILABLE_NEUTRAL", pending: "CONFIRMATION" });
 });
 
 // ============================================================

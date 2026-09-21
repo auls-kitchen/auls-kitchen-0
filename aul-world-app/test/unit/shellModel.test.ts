@@ -3,14 +3,18 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { initialShellState, resolveHomeActivation, shellAttributes, viewForRoute, withHabitat, withWake } from "../../src/shell/shellModel.ts";
 import type { ShellState } from "../../src/shell/shellModel.ts";
 
 test("S1. each wake route maps to exactly one view", () => {
   assert.equal(viewForRoute("DISCOVER_MENU"), "discover");
-  assert.equal(viewForRoute("OWNERSHIP_CONFIRMATION"), "ownership");
   assert.equal(viewForRoute("WAIT_NOT_READY"), "waiting");
+  assert.equal(viewForRoute("PROTECTED_NEUTRAL"), "protected");
+  assert.equal(viewForRoute("UNAVAILABLE_NEUTRAL"), "unavailable");
 });
 
 test("S2. the initial state is Habitat with nothing routed", () => {
@@ -18,20 +22,21 @@ test("S2. the initial state is Habitat with nothing routed", () => {
   assert.equal(state.phase, "HABITAT_IDLE");
   assert.equal(state.view, "habitat");
   assert.equal(state.wakeRoute, "");
-  assert.equal(state.pending, "");
+  assert.equal("pending" in state, false, "the shell keeps no pending-ticket field");
   assert.equal(state.domainStatus, "BOOTSTRAPPING");
 });
 
-test("S3. a wake records the route and pending kind and switches the view", () => {
-  const woken = withWake(initialShellState("READY"), { route: "OWNERSHIP_CONFIRMATION", pending: "UNRESOLVED" });
-  assert.equal(woken.view, "ownership");
-  assert.equal(woken.wakeRoute, "OWNERSHIP_CONFIRMATION");
-  assert.equal(woken.pending, "UNRESOLVED");
+test("S3. a wake records the route and switches the view - and keeps no trace of the decision's ticket kind", () => {
+  const woken = withWake(initialShellState("READY"), { route: "PROTECTED_NEUTRAL", pending: "UNRESOLVED" });
+  assert.equal(woken.view, "protected");
+  assert.equal(woken.wakeRoute, "PROTECTED_NEUTRAL");
+  assert.equal("pending" in woken, false);
+  assert.equal(JSON.stringify(woken).includes("UNRESOLVED"), false, "the previous customer's ticket kind is nowhere in the shell state");
 });
 
-test("S4. entering Habitat resets only the Experience view state, nothing else", () => {
+test("S4. entering Habitat resets the Experience view state and the last-event mirror, and nothing else", () => {
   const busy: ShellState = {
-    ...withWake(initialShellState("READY"), { route: "OWNERSHIP_CONFIRMATION", pending: "ACTIVE_CART" }),
+    ...withWake(initialShellState("READY"), { route: "UNAVAILABLE_NEUTRAL", pending: "ACTIVE_CART" }),
     phase: "RELEASED",
     domainLastEvent: "SESSION_STARTED",
     world: { presentationMode: "ORDERING", camera: "MENU_FOCUS", aulMood: "happy", aulInteractions: 3, frame: 99 },
@@ -39,10 +44,11 @@ test("S4. entering Habitat resets only the Experience view state, nothing else",
   const habitat = withHabitat(busy);
   assert.equal(habitat.view, "habitat");
   assert.equal(habitat.wakeRoute, "");
-  assert.equal(habitat.pending, "");
-  // Domain- and AWR-derived mirrors are untouched by an Experience reset.
+  // The customer has left: the previous context's last event is dropped with the rest of its view.
+  assert.equal(habitat.domainLastEvent, "");
+  // The Domain status, the phase and the AWR mirror are untouched by an Experience reset.
   assert.equal(habitat.domainStatus, "READY");
-  assert.equal(habitat.domainLastEvent, "SESSION_STARTED");
+  assert.equal(habitat.phase, "RELEASED");
   assert.deepEqual({ ...habitat.world }, { ...busy.world });
 });
 
@@ -63,7 +69,6 @@ test("S6. the attribute map is exactly the documented data-* hooks, all strings,
     "data-domain-last-event",
     "data-domain-status",
     "data-interaction-phase",
-    "data-pending",
     "data-view",
     "data-wake-route",
     "data-world-camera",
@@ -82,6 +87,58 @@ test("S7. numeric mirrors are stringified", () => {
   const attributes = shellAttributes(state);
   assert.equal(attributes["data-aul-interactions"], "7");
   assert.equal(attributes["data-world-frame"], "1234");
+});
+
+// ============================================================
+// U4 Slice 2B, S4a: presentation-only views, no pending ticket, last-event boundary
+// ============================================================
+
+const ALL_ROUTES = ["WAIT_NOT_READY", "DISCOVER_MENU", "PROTECTED_NEUTRAL", "UNAVAILABLE_NEUTRAL"] as const;
+const SHELL_SOURCE = () => fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "src", "shell", "shellModel.ts"), "utf8").replace(/\/\/[^\n]*/g, "");
+
+test("S16. data-pending is completely absent: no attribute, no state field, no code that mentions a pending ticket", () => {
+  for (const route of ALL_ROUTES) {
+    const state = withWake(initialShellState("READY"), { route, pending: "CONFIRMATION" });
+    assert.equal(Object.keys(shellAttributes(state)).includes("data-pending"), false, route);
+    assert.equal(Object.keys(state).includes("pending"), false, route);
+    assert.equal(Object.values(shellAttributes(state)).some((v) => v === "CONFIRMATION"), false, "no attribute carries the ticket kind");
+  }
+  assert.equal(/\bpending\b/i.test(SHELL_SOURCE()), false, "shellModel.ts no longer mentions a pending ticket in code");
+});
+
+test("S17. protected and unavailable are PRESENTATION views only: distinct from every Domain state and from waiting", () => {
+  const views = ALL_ROUTES.map((route) => viewForRoute(route));
+  assert.deepEqual([...views].sort(), ["discover", "protected", "unavailable", "waiting"]);
+  assert.equal(new Set(views).size, 4, "each route has its own view");
+  const domainVocabulary = ["idle", "active", "awaiting_outcome", "confirmation", "NONE", "PENDING", "UNCERTAIN", "CONFIRMED", "DECLINED", "READY", "FAILED", "BOOTSTRAPPING"];
+  for (const view of [...views, "habitat"]) assert.equal(domainVocabulary.includes(view), false, view);
+  assert.equal(viewForRoute("UNAVAILABLE_NEUTRAL") === viewForRoute("WAIT_NOT_READY"), false, "unavailable is not ordinary waiting");
+  assert.equal(/ownership/i.test(SHELL_SOURCE()), false, "no ownership view exists");
+});
+
+test("S18. every presented decision clears the previous context's last-event mirror - whatever the route", () => {
+  for (const route of ALL_ROUTES) {
+    const before: ShellState = { ...initialShellState("READY"), domainLastEvent: "ORDER_OUTCOME_CHANGED" };
+    const after = withWake(before, { route, pending: "NONE" });
+    assert.equal(after.domainLastEvent, "", route);
+    assert.equal(shellAttributes(after)["data-domain-last-event"], "");
+    assert.equal(before.domainLastEvent, "ORDER_OUTCOME_CHANGED", "the input is never mutated");
+  }
+});
+
+test("S19. a wake changes only the view, the route and the last-event mirror: phase, Domain status and the World mirror survive", () => {
+  const before: ShellState = {
+    ...initialShellState("READY"),
+    phase: "ACTIVE_STANDBY",
+    domainLastEvent: "SESSION_STARTED",
+    world: { presentationMode: "WORLD", camera: "AUL_FOCUS", aulMood: "happy", aulInteractions: 2, frame: 40 },
+  };
+  const after = withWake(before, { route: "DISCOVER_MENU", pending: "NONE" });
+  assert.deepEqual(
+    { ...after, view: "", wakeRoute: "", domainLastEvent: "" },
+    { ...before, view: "", wakeRoute: "", domainLastEvent: "" },
+    "nothing but view, wakeRoute and domainLastEvent differs",
+  );
 });
 
 // ============================================================

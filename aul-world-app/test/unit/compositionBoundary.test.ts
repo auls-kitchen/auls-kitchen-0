@@ -24,7 +24,7 @@ const AWR_SRC = path.resolve(HERE, "..", "..", "..", "aul-world-runtime", "src")
 
 const COMPOSITION = "composition/compositionRoot.ts";
 // Composition files that are NOT the root: injected and pure, held to the strict scan (CB13).
-const COMPOSITION_HELPERS = ["composition/contextTransitions.ts"];
+const COMPOSITION_HELPERS = ["composition/contextTransitions.ts", "composition/contextBoundary.ts"];
 const SHELL_FILES = ["shell/shellModel.ts", "shell/experienceShell.ts"];
 
 // The AWR modules the Composition may import DIRECTLY (what AWR's own bootstrap
@@ -132,8 +132,8 @@ test("CB5. no lifecycle, shell or contract file mentions `host` or imports AWR o
   const others = walk(SRC_ROOT).filter((f) => f !== COMPOSITION);
   assert.equal(
     others.length,
-    10,
-    "expected exactly the 8 U0-U3 non-composition source files, U4 Slice 2A's takeoverPolicy.ts, and U4 Slice 2B's composition/contextTransitions.ts",
+    11,
+    "expected exactly the 8 U0-U3 non-composition source files, U4 Slice 2A's takeoverPolicy.ts, and U4 Slice 2B's composition/contextTransitions.ts and composition/contextBoundary.ts",
   );
   for (const file of others) {
     const code = stripComments(read(file));

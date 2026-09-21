@@ -8,7 +8,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
-import { classifyPending, hasPendingTicket, releasePlanFor, routeCustomerReturn } from "../../src/experience/pendingTicket.ts";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { classifyPending, releasePlanFor, routeCustomerReturn } from "../../src/experience/pendingTicket.ts";
 import type { ExperienceSnapshotView } from "../../src/contracts.ts";
 import {
   ITEM,
@@ -53,7 +57,6 @@ test("J3. ACTIVE + cart lines -> ACTIVE_CART (pending)", async () => {
   assert.equal(snapshot.session, "active");
   assert.equal(snapshot.cart.lines.length, 1);
   assert.equal(classifyPending(snapshot), "ACTIVE_CART");
-  assert.equal(hasPendingTicket(classifyPending(snapshot)), true);
 });
 
 test("J4. ACTIVE + EMPTY cart is NOT a pending ticket (clearCart leaves session active)", async () => {
@@ -65,7 +68,6 @@ test("J4. ACTIVE + EMPTY cart is NOT a pending ticket (clearCart leaves session 
   assert.equal(snapshot.session, "active");
   assert.equal(snapshot.cart.lines.length, 0);
   assert.equal(classifyPending(snapshot), "NONE");
-  assert.equal(hasPendingTicket(classifyPending(snapshot)), false);
 });
 
 test("J5. CONFIRMATION -> pending", async () => {
@@ -76,7 +78,6 @@ test("J5. CONFIRMATION -> pending", async () => {
   const snapshot = orchestrator.getSnapshot();
   assert.equal(snapshot.session, "confirmation");
   assert.equal(classifyPending(snapshot), "CONFIRMATION");
-  assert.equal(hasPendingTicket(classifyPending(snapshot)), true);
 });
 
 test("J6. AWAITING_OUTCOME / UNKNOWN -> UNRESOLVED (pending)", async () => {
@@ -88,7 +89,6 @@ test("J6. AWAITING_OUTCOME / UNKNOWN -> UNRESOLVED (pending)", async () => {
   assert.equal(snapshot.session, "awaiting_outcome");
   assert.equal(snapshot.order.status, "UNCERTAIN");
   assert.equal(classifyPending(snapshot), "UNRESOLVED");
-  assert.equal(hasPendingTicket(classifyPending(snapshot)), true);
 });
 
 test("J7. a submit() still IN FLIGHT is UNRESOLVED even though the order status still reads NONE", async () => {
@@ -183,28 +183,30 @@ test("J12. classification is read-only: a deeply frozen real snapshot is never m
 // F (pure part). Return routing decision
 // ============================================================
 
-test("F1. routing maps each pending kind to exactly one destination", async () => {
+test("F1. routing maps each Domain state to exactly one destination; with no verdict a releasable context fails closed", async () => {
   const idle = await readyFixture();
   assert.deepEqual({ ...routeCustomerReturn(idle.orchestrator.getSnapshot()) }, { route: "DISCOVER_MENU", pending: "NONE" });
 
+  // A releasable context (ACTIVE empty, ACTIVE + Cart, CONFIRMATION) is never shown as a
+  // fresh kiosk without the caller's own FRESH verdict: it is neutral, never an ownership question.
   const emptyActive = await readyFixture();
   emptyActive.orchestrator.addItem(ITEM);
   emptyActive.orchestrator.clearCart();
-  assert.deepEqual({ ...routeCustomerReturn(emptyActive.orchestrator.getSnapshot()) }, { route: "DISCOVER_MENU", pending: "NONE" });
+  assert.deepEqual({ ...routeCustomerReturn(emptyActive.orchestrator.getSnapshot()) }, { route: "UNAVAILABLE_NEUTRAL", pending: "NONE" });
 
   const withCart = await readyFixture();
   withCart.orchestrator.addItem(ITEM);
-  assert.deepEqual({ ...routeCustomerReturn(withCart.orchestrator.getSnapshot()) }, { route: "OWNERSHIP_CONFIRMATION", pending: "ACTIVE_CART" });
+  assert.deepEqual({ ...routeCustomerReturn(withCart.orchestrator.getSnapshot()) }, { route: "UNAVAILABLE_NEUTRAL", pending: "ACTIVE_CART" });
 
   const confirmed = await readyFixture(succeedingCallable());
   confirmed.orchestrator.addItem(ITEM);
   await confirmed.orchestrator.submit();
-  assert.deepEqual({ ...routeCustomerReturn(confirmed.orchestrator.getSnapshot()) }, { route: "OWNERSHIP_CONFIRMATION", pending: "CONFIRMATION" });
+  assert.deepEqual({ ...routeCustomerReturn(confirmed.orchestrator.getSnapshot()) }, { route: "UNAVAILABLE_NEUTRAL", pending: "CONFIRMATION" });
 
   const unknown = await readyFixture(unknownCallable());
   unknown.orchestrator.addItem(ITEM);
   await unknown.orchestrator.submit();
-  assert.deepEqual({ ...routeCustomerReturn(unknown.orchestrator.getSnapshot()) }, { route: "OWNERSHIP_CONFIRMATION", pending: "UNRESOLVED" });
+  assert.deepEqual({ ...routeCustomerReturn(unknown.orchestrator.getSnapshot()) }, { route: "PROTECTED_NEUTRAL", pending: "UNRESOLVED" });
 });
 
 test("F2. a not-ready snapshot routes to WAIT_NOT_READY (never Discover)", () => {
@@ -224,6 +226,97 @@ test("F3. routing only reads: the Domain state is identical before and after", a
   for (let i = 0; i < 5; i++) routeCustomerReturn(orchestrator.getSnapshot());
   assert.equal(JSON.stringify(orchestrator.getSnapshot()), before);
   assert.equal(orchestrator.getSnapshot().session, "awaiting_outcome");
+});
+
+// ============================================================
+// U4 Slice 2B, S4a: the ownership route is retired; routing is verdict-aware
+// ============================================================
+//
+// routeCustomerReturn(snapshot, verdict?) is the one pure router. The verdict is the
+// caller's OWN release outcome for the context in THAT snapshot; it can only ever matter
+// when the snapshot holds a releasable context, and it can only ever be trusted when it is
+// exactly "FRESH". No input can produce an ownership question.
+
+const ROUTES = ["WAIT_NOT_READY", "DISCOVER_MENU", "PROTECTED_NEUTRAL", "UNAVAILABLE_NEUTRAL"];
+const VERDICTS: unknown[] = [undefined, "FRESH", "UNAVAILABLE", "fresh", "RELEASED", "NOTHING_TO_RELEASE", "", null, 0, 1, true, {}, [], "OWNERSHIP_CONFIRMATION"];
+
+const ALL_SESSIONS = ["idle", "active", "awaiting_outcome", "confirmation"];
+const ALL_STATUSES = ["NONE", "PENDING", "UNCERTAIN", "CONFIRMED", "DECLINED"];
+
+test("F4. OWNERSHIP_CONFIRMATION cannot be produced: every state x cart size x verdict lands on one of exactly four routes", () => {
+  let checked = 0;
+  for (const ready of [true, false]) {
+    for (const session of ALL_SESSIONS) {
+      for (const lines of [0, 1, 4]) {
+        for (const status of ALL_STATUSES) {
+          for (const verdict of VERDICTS) {
+            const decision = routeCustomerReturn(snap(session, lines, status, ready), verdict as never);
+            assert.ok(ROUTES.includes(decision.route), `${ready}/${session}/${lines}/${status}/${String(verdict)} -> ${decision.route}`);
+            assert.notEqual(decision.route as string, "OWNERSHIP_CONFIRMATION");
+            checked += 1;
+          }
+        }
+      }
+    }
+  }
+  assert.equal(checked, 2 * 4 * 3 * 5 * VERDICTS.length);
+  for (const junk of [null, undefined, {}, "x", 7, []]) {
+    assert.ok(ROUTES.includes(routeCustomerReturn(junk as never, "FRESH").route));
+  }
+});
+
+test("F5. the route vocabulary is exactly four presentation routes, and the retired one exists nowhere in the code", () => {
+  const source = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "src", "experience", "pendingTicket.ts"), "utf8");
+  const code = source.replace(/\/\/[^\n]*/g, "");
+  const union = code.match(/export type WakeRoute =([^;]+);/)![1]!;
+  assert.deepEqual([...union.matchAll(/"(\w+)"/g)].map((m) => m[1]).sort(), [...ROUTES].sort());
+  assert.equal(/OWNERSHIP_CONFIRMATION/.test(code), false, "the retired route is gone from the code");
+  assert.equal(/hasPendingTicket/.test(code), false, "the ownership route's helper is gone with it");
+});
+
+test("F6. a releasable context is DISCOVER_MENU only for the exact verdict FRESH; every other value fails closed", () => {
+  const releasable = [snap("active", 0, "NONE"), snap("active", 2, "NONE"), snap("active", 1, "DECLINED"), snap("confirmation", 1, "CONFIRMED")];
+  for (const snapshot of releasable) {
+    assert.equal(releasePlanFor(snapshot), "RELEASE");
+    assert.deepEqual({ ...routeCustomerReturn(snapshot, "FRESH") }, { route: "DISCOVER_MENU", pending: "NONE" }, "the context is gone, so nothing pends");
+    for (const verdict of VERDICTS.filter((v) => v !== "FRESH")) {
+      assert.equal(routeCustomerReturn(snapshot, verdict as never).route, "UNAVAILABLE_NEUTRAL", String(verdict));
+    }
+    assert.equal(routeCustomerReturn(snapshot, "UNAVAILABLE").route, "UNAVAILABLE_NEUTRAL");
+  }
+});
+
+test("F7. a verdict can never launder a protected or unreadable Domain: PROTECTED stays neutral, NOT_READY stays waiting, under every verdict", () => {
+  const protectedStates = [snap("awaiting_outcome", 1, "UNCERTAIN"), snap("awaiting_outcome", 1, "NONE"), snap("active", 1, "PENDING"), snap("idle", 0, "UNCERTAIN")];
+  for (const snapshot of protectedStates) {
+    assert.equal(releasePlanFor(snapshot), "PROTECTED");
+    for (const verdict of VERDICTS) {
+      assert.equal(routeCustomerReturn(snapshot, verdict as never).route, "PROTECTED_NEUTRAL", `${snapshot.session}/${String(verdict)}`);
+    }
+  }
+  for (const verdict of VERDICTS) {
+    assert.equal(routeCustomerReturn(snap("active", 1, "NONE", false), verdict as never).route, "WAIT_NOT_READY");
+    assert.equal(routeCustomerReturn(null, verdict as never).route, "WAIT_NOT_READY");
+  }
+});
+
+test("F8. an idle Domain has nothing to release, so its route ignores the verdict (even UNAVAILABLE)", () => {
+  for (const verdict of VERDICTS) {
+    assert.deepEqual({ ...routeCustomerReturn(snap("idle", 0, "NONE"), verdict as never) }, { route: "DISCOVER_MENU", pending: "NONE" }, String(verdict));
+  }
+});
+
+test("F9. the decision is a frozen, plain pair; routing with a verdict only reads (the real Domain is untouched)", async () => {
+  const { orchestrator } = await readyFixture(succeedingCallable());
+  orchestrator.addItem(ITEM);
+  await orchestrator.submit();
+  const before = JSON.stringify(orchestrator.getSnapshot());
+  const decision = routeCustomerReturn(orchestrator.getSnapshot(), "FRESH");
+  assert.ok(Object.isFrozen(decision));
+  assert.deepEqual(Object.keys(decision).sort(), ["pending", "route"]);
+  for (const verdict of VERDICTS) routeCustomerReturn(orchestrator.getSnapshot(), verdict as never);
+  assert.equal(JSON.stringify(orchestrator.getSnapshot()), before);
+  assert.equal(orchestrator.getSnapshot().session, "confirmation", "routing never released anything");
 });
 
 // ============================================================
@@ -382,11 +475,11 @@ test("RP9. the plan only reads: the real Domain is identical before and after an
   assert.equal(JSON.stringify(orchestrator.getSnapshot()), before);
 });
 
-test("RP10. classifyPending and routeCustomerReturn are untouched by S3: the same answers as before for every state", () => {
+test("RP10. classifyPending is untouched (S3 and S4a): the same answers as before for every state; only routing changed", () => {
   assert.equal(classifyPending(snap("active", 0, "NONE")), "NONE");
   assert.equal(classifyPending(snap("active", 1, "NONE")), "ACTIVE_CART");
   assert.equal(classifyPending(snap("confirmation", 1, "CONFIRMED")), "CONFIRMATION");
   assert.equal(classifyPending(snap("awaiting_outcome", 1, "UNCERTAIN")), "UNRESOLVED");
-  assert.deepEqual({ ...routeCustomerReturn(snap("confirmation", 1, "CONFIRMED")) }, { route: "OWNERSHIP_CONFIRMATION", pending: "CONFIRMATION" });
+  assert.deepEqual({ ...routeCustomerReturn(snap("confirmation", 1, "CONFIRMED")) }, { route: "UNAVAILABLE_NEUTRAL", pending: "CONFIRMATION" });
   assert.deepEqual({ ...routeCustomerReturn(snap("idle", 0, "NONE")) }, { route: "DISCOVER_MENU", pending: "NONE" });
 });

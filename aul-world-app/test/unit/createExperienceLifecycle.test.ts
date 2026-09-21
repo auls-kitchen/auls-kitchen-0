@@ -220,7 +220,9 @@ test("L8. the wake decision follows the snapshot read at that moment (not a cach
   time.advanceBy(300_000);
   current = { ready: true, session: "confirmation", cart: { lines: [{}] }, order: { status: "CONFIRMED" }, degraded: null };
   input.dispatch(trusted.tap());
-  assert.deepEqual({ ...wakes[1]! }, { route: "OWNERSHIP_CONFIRMATION", pending: "CONFIRMATION" });
+  // The lifecycle alone has no release verdict, so a releasable context is the fail-closed neutral route
+  // (never an ownership question); the Composition, not the lifecycle, will decide otherwise (later slices).
+  assert.deepEqual({ ...wakes[1]! }, { route: "UNAVAILABLE_NEUTRAL", pending: "CONFIRMATION" });
 
   time.advanceBy(300_000);
   current = { ready: false, session: "idle", cart: { lines: [] }, order: { status: "NONE" }, degraded: null };
@@ -397,10 +399,12 @@ function measureDomain(fixture: Awaited<ReturnType<typeof buildDomain>>) {
   };
 }
 
-const EXPECTED_PENDING: Record<DomainKind, { session: string; pending: string; order: string }> = {
-  active_cart: { session: "active", pending: "ACTIVE_CART", order: "NONE" },
-  confirmation: { session: "confirmation", pending: "CONFIRMATION", order: "CONFIRMED" },
-  unknown: { session: "awaiting_outcome", pending: "UNRESOLVED", order: "UNCERTAIN" },
+// What the lifecycle alone routes to (it holds no release verdict): an unresolved submission is the
+// neutral PROTECTED route, and a releasable context fails closed to the neutral UNAVAILABLE route.
+const EXPECTED_PENDING: Record<DomainKind, { session: string; pending: string; order: string; route: string }> = {
+  active_cart: { session: "active", pending: "ACTIVE_CART", order: "NONE", route: "UNAVAILABLE_NEUTRAL" },
+  confirmation: { session: "confirmation", pending: "CONFIRMATION", order: "CONFIRMED", route: "UNAVAILABLE_NEUTRAL" },
+  unknown: { session: "awaiting_outcome", pending: "UNRESOLVED", order: "UNCERTAIN", route: "PROTECTED_NEUTRAL" },
 };
 
 for (const kind of ["active_cart", "confirmation", "unknown"] as const) {
@@ -422,7 +426,7 @@ for (const kind of ["active_cart", "confirmation", "unknown"] as const) {
 
     // The customer interacts, then goes silent through every threshold.
     input.dispatch(trusted.tap());
-    assert.deepEqual({ ...wakes[0]! }, { route: "OWNERSHIP_CONFIRMATION", pending: expected.pending });
+    assert.deepEqual({ ...wakes[0]! }, { route: expected.route, pending: expected.pending });
     time.advanceBy(15_000);
     assert.equal(lifecycle.getPhase(), "SPACE_GIVEN");
     assert.deepEqual(measureDomain(fixture), before, "Domain changed at 15s");
@@ -446,7 +450,7 @@ for (const kind of ["active_cart", "confirmation", "unknown"] as const) {
 
     // Habitat return: a customer comes back; only the snapshot is read.
     input.dispatch(trusted.tap());
-    assert.deepEqual({ ...wakes[1]! }, { route: "OWNERSHIP_CONFIRMATION", pending: expected.pending });
+    assert.deepEqual({ ...wakes[1]! }, { route: expected.route, pending: expected.pending });
     assert.deepEqual(measureDomain(fixture), before, "Domain changed on wake");
     assert.equal(domainEvents.length, 0);
 
@@ -476,7 +480,7 @@ test("Domain events during Habitat: an in-flight order settles while the kiosk i
     ordering: true,
   });
   input.dispatch(trusted.tap());
-  assert.deepEqual({ ...wakes[0]! }, { route: "OWNERSHIP_CONFIRMATION", pending: "UNRESOLVED" });
+  assert.deepEqual({ ...wakes[0]! }, { route: "PROTECTED_NEUTRAL", pending: "UNRESOLVED" });
 
   time.advanceBy(300_000);
   assert.equal(lifecycle.getPhase(), "HABITAT_IDLE");
@@ -500,7 +504,7 @@ test("Domain events during Habitat: an in-flight order settles while the kiosk i
 
   // The customer returns and sees the real, settled state.
   input.dispatch(trusted.tap());
-  assert.deepEqual({ ...wakes[1]! }, { route: "OWNERSHIP_CONFIRMATION", pending: "CONFIRMATION" });
+  assert.deepEqual({ ...wakes[1]! }, { route: "UNAVAILABLE_NEUTRAL", pending: "CONFIRMATION" });
   lifecycle.dispose();
 });
 

@@ -7,19 +7,24 @@
 //
 // Nothing here decides anything. It maps values other modules already
 // decided (a phase from the lifecycle, a route from the pending-ticket
-// router) to attribute strings. In particular there is NO Domain action here:
-// the "ownership" view is an inert marker for the deferred U4 confirmation UI,
+// router) to attribute strings. In particular there is NO Domain action here,
 // and no view can end a session, clear a cart, or retry an order.
+//
+// The shell never renders a previous customer's ticket: there is no ownership
+// view and no pending-ticket attribute, and its last-Domain-event mirror is
+// cleared whenever a customer boundary is presented (a wake, or Habitat).
 
 import type { InteractionPhase, RestingPhase } from "../experience/interactionContext.ts";
 import type { WakeDecision, WakeRoute } from "../experience/pendingTicket.ts";
 
-// habitat    : no customer context is being served (boot, and after expiry)
-// discover   : a customer woke the kiosk with no pending ticket
-// ownership  : a customer woke the kiosk with a pending ticket (U4 will ask
-//              "Hi Kak, ini pesanan Kakak, ya?"; inert until then)
-// waiting    : a customer woke the kiosk before the Domain was ready
-export type ShellView = "habitat" | "discover" | "ownership" | "waiting";
+// PRESENTATION views only - none of them is a Domain state.
+// habitat     : no customer context is being served (boot, and after expiry)
+// discover    : a customer has a fresh start
+// waiting     : a customer woke the kiosk before the Domain was ready
+// protected   : an unresolved submission exists; a neutral view, with no question
+// unavailable : a previous context could not be shown as fresh; a neutral view,
+//               distinct from waiting
+export type ShellView = "habitat" | "discover" | "waiting" | "protected" | "unavailable";
 
 export interface WorldMirror {
   readonly presentationMode: string;
@@ -33,7 +38,6 @@ export interface ShellState {
   readonly phase: InteractionPhase;
   readonly view: ShellView;
   readonly wakeRoute: string;
-  readonly pending: string;
   readonly domainStatus: string;
   readonly domainLastEvent: string;
   readonly world: WorldMirror;
@@ -45,8 +49,10 @@ export function viewForRoute(route: WakeRoute): ShellView {
       return "waiting";
     case "DISCOVER_MENU":
       return "discover";
-    case "OWNERSHIP_CONFIRMATION":
-      return "ownership";
+    case "PROTECTED_NEUTRAL":
+      return "protected";
+    case "UNAVAILABLE_NEUTRAL":
+      return "unavailable";
   }
 }
 
@@ -55,21 +61,24 @@ export function initialShellState(domainStatus: string): ShellState {
     phase: "HABITAT_IDLE",
     view: "habitat",
     wakeRoute: "",
-    pending: "",
     domainStatus,
     domainLastEvent: "",
     world: Object.freeze({ presentationMode: "", camera: "", aulMood: "", aulInteractions: 0, frame: 0 }),
   });
 }
 
+// A customer's presented decision. The decision's diagnostic `pending` kind is NOT
+// kept, and the last-Domain-event mirror is cleared: it is the previous context's
+// activity, and must not carry across the boundary this presentation is.
 export function withWake(state: ShellState, decision: WakeDecision): ShellState {
-  return Object.freeze({ ...state, view: viewForRoute(decision.route), wakeRoute: decision.route, pending: decision.pending });
+  return Object.freeze({ ...state, view: viewForRoute(decision.route), wakeRoute: decision.route, domainLastEvent: "" });
 }
 
-// Entering Habitat resets the Experience-only view state. It clears nothing in
-// the Domain: the last wake route is dropped from the shell, that is all.
+// Entering Habitat resets the Experience-only view state and the last-Domain-event
+// mirror (the customer has left). It clears nothing in the Domain: the last wake
+// route and the last event are dropped from the shell, that is all.
 export function withHabitat(state: ShellState): ShellState {
-  return Object.freeze({ ...state, view: "habitat", wakeRoute: "", pending: "" });
+  return Object.freeze({ ...state, view: "habitat", wakeRoute: "", domainLastEvent: "" });
 }
 
 // A customer's Home/X activation, as the shell hands it to the Composition:
@@ -110,7 +119,6 @@ export function shellAttributes(state: ShellState): Readonly<Record<string, stri
     "data-interaction-phase": state.phase,
     "data-view": state.view,
     "data-wake-route": state.wakeRoute,
-    "data-pending": state.pending,
     "data-domain-status": state.domainStatus,
     "data-domain-last-event": state.domainLastEvent,
     "data-world-presentation": state.world.presentationMode,

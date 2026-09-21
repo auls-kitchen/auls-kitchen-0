@@ -72,7 +72,7 @@ async function expectNoDomainEffect(page: Page, orderIntentCalls: number, snapsh
 async function expectNoRouting(page: Page): Promise<void> {
   expect(await attribute(page, "data-view")).toBe("discover");
   expect(await attribute(page, "data-wake-route")).toBe("DISCOVER_MENU");
-  expect(await attribute(page, "data-pending")).toBe("NONE");
+  expect(await page.locator("[data-experience-shell]").getAttribute("data-pending")).toBeNull(); // U4 S4a: the hook is gone
   const text = (await page.locator("[data-experience-shell]").innerText()).toLowerCase();
   for (const word of ["bukan", "ini pesanan", "ownership"]) expect(text).not.toContain(word);
 }

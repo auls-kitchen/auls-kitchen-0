@@ -243,13 +243,13 @@ for (const mode of ["real", "refuse", "throw", "reject", "garbage"] as const) {
     // Whatever the answer (FRESH for "real", UNAVAILABLE for the rest), the shell shows the same thing:
     // Habitat entered exactly as it always was, and the World exactly as it was.
     const attributes = await shellAttributes(page);
-    expect(pick(attributes, ["data-interaction-phase", "data-view", "data-wake-route", "data-pending", "data-domain-status"])).toEqual({
+    expect(pick(attributes, ["data-interaction-phase", "data-view", "data-wake-route", "data-domain-status"])).toEqual({
       "data-interaction-phase": "HABITAT_IDLE",
       "data-view": "habitat",
       "data-wake-route": "",
-      "data-pending": "",
       "data-domain-status": "READY",
     });
+    expect("data-pending" in attributes).toBe(false); // U4 S4a: no pending-ticket hook exists any more
     expect(pick(attributes, WORLD_KEYS)).toEqual(worldBefore);
     // The Domain changed only if the REAL release ran; a fake answer touched nothing.
     if (mode === "real") await expectIdle(page);
