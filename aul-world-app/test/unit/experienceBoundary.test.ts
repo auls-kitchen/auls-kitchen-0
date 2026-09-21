@@ -296,7 +296,8 @@ test("C16. Slice 2A: the phase latch is written only inside the lifecycle, and o
   const code = codeOf("experience/createExperienceLifecycle.ts");
   // Every assignment to the latch is guarded by the press kind, or is the one-shot clear / dispose clear.
   const assignments = [...code.matchAll(/\bgesture\s*=\s*([^;]+);/g)].map((m) => m[1]!.trim());
-  assert.deepEqual(assignments.sort(), ["Object.freeze({ phaseBefore: observation.phaseBefore })", "null", "null", "null"].sort());
+  // S1 (stale latch): the latch now also carries the press time, read before the timer ran.
+  assert.deepEqual(assignments.sort(), ["Object.freeze({ phaseBefore: observation.phaseBefore, at: pressAt })", "null", "null", "null"].sort());
   assert.match(code, /if \(kind === "press"\) gesture = null;/);
   assert.match(code, /if \(kind === "press" && observation !== null\)/);
 });

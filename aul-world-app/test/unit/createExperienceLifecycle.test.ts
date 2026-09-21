@@ -12,8 +12,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { createExperienceLifecycle } from "../../src/experience/createExperienceLifecycle.ts";
+import { DEFAULT_GESTURE_MAX_AGE_MS, createExperienceLifecycle } from "../../src/experience/createExperienceLifecycle.ts";
 import type { ExperienceLifecycleOptions } from "../../src/experience/createExperienceLifecycle.ts";
+import { CUSTOMER_INPUT_EVENT_TYPES } from "../../src/experience/customerInput.ts";
+import { resolveHomeActivation } from "../../src/shell/shellModel.ts";
 import type { InteractionPhase } from "../../src/experience/interactionContext.ts";
 import type { WakeDecision } from "../../src/experience/pendingTicket.ts";
 import { createMonotonicClock, createTimeoutScheduler } from "../../src/experience/silenceTimer.ts";
@@ -40,6 +42,7 @@ interface HarnessOptions {
   readonly snapshots?: SnapshotReadPort;
   readonly ordering?: boolean;
   readonly thresholds?: ExperienceLifecycleOptions["thresholds"];
+  readonly gestureMaxAgeMs?: number;
 }
 
 function harness(options: HarnessOptions = {}) {
@@ -69,6 +72,7 @@ function harness(options: HarnessOptions = {}) {
     },
     world: { isOrdering: () => world.ordering },
     thresholds: options.thresholds,
+    gestureMaxAgeMs: options.gestureMaxAgeMs,
     onPhase: (phase) => phases.push(phase),
     onWake: (decision) => wakes.push(decision),
     onError: (error) => errors.push(error),
@@ -780,10 +784,11 @@ test("LG10. a synthetic press does not disturb an earlier real latch", () => {
   assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "RELEASED" });
 });
 
-test("LG11. the latch is the phase before THAT press - later silence does not rewrite it", () => {
-  const { time, input, lifecycle } = harness();
+test("LG11. the latch is the phase before THAT press - a later phase change (inside the freshness window) does not rewrite it", () => {
+  // Scaled thresholds, so the window really moves on while the latch is still fresh.
+  const { time, input, lifecycle } = harness({ thresholds: { spaceGivenMs: 500, releasedMs: 1_000, contextExpiredMs: 50_000 } });
   input.dispatch(trusted.tap()); // from Habitat
-  time.advanceBy(26_000);
+  time.advanceBy(1_200);
   assert.equal(lifecycle.getPhase(), "RELEASED");
   assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "HABITAT_IDLE" });
 });
@@ -855,4 +860,284 @@ test("LG16. consumeGesture works detached from the object (no reliance on `this`
   const { consumeGesture } = lifecycle;
   input.dispatch(trusted.tap());
   assert.deepEqual(consumeGesture(), { phaseBefore: "HABITAT_IDLE" });
+});
+
+// ============================================================
+// Stale-latch freshness (U4 Slice 2B, S1 / O1): fail closed
+// ============================================================
+//
+// A press latches {phaseBefore, at}; consumeGesture() honours it only while
+// 0 <= age <= gestureMaxAgeMs, clears it whatever the outcome, and reads `at`
+// from the injected monotonic clock BEFORE the timer processes the press.
+
+// A lifecycle whose clock can be overridden (NaN, backwards) on top of the fake time.
+function clockControlledLifecycle(extra: Partial<ExperienceLifecycleOptions> = {}) {
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  let override: number | null = null;
+  const clock = { now: (): number => (override === null ? time.clock.now() : override) };
+  const lifecycle = createExperienceLifecycle({
+    clock,
+    scheduler: time.scheduler,
+    inputTarget: input.target,
+    snapshots: { getSnapshot: () => IDLE_READY },
+    presentation: { returnToWorld: () => {} },
+    world: { isOrdering: () => false },
+    ...extra,
+  });
+  lifecycle.start();
+  return { time, input, lifecycle, setClock: (value: number | null) => void (override = value) };
+}
+
+test("LF1. a fresh latch is accepted (age 0 and age 500 ms)", () => {
+  for (const wait of [0, 500]) {
+    const { time, input, lifecycle } = harness();
+    input.dispatch(trusted.tap());
+    time.advanceBy(wait);
+    assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "HABITAT_IDLE" }, `${wait}ms`);
+  }
+});
+
+test("LF2. a stale latch is rejected (2001 ms with the default), consuming has no side effect on the window, and the latch is gone", () => {
+  const { time, input, lifecycle, phases } = harness();
+  input.dispatch(trusted.tap());
+  time.advanceBy(DEFAULT_GESTURE_MAX_AGE_MS + 1);
+  const pendingBefore = time.pendingCount();
+  const phasesBefore = [...phases];
+
+  assert.equal(lifecycle.consumeGesture(), null);
+
+  assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY", "refusing a stale latch changes nothing about the silence window");
+  assert.equal(time.pendingCount(), pendingBefore);
+  assert.deepEqual(phases, phasesBefore);
+  assert.equal(lifecycle.consumeGesture(), null);
+});
+
+test("LF3. the freshness boundary is inclusive: exactly the maximum is accepted, one millisecond more is not (default and custom)", () => {
+  for (const [max, options] of [
+    [DEFAULT_GESTURE_MAX_AGE_MS, {}],
+    [750, { gestureMaxAgeMs: 750 }],
+    [60_000, { gestureMaxAgeMs: 60_000 }],
+  ] as const) {
+    const exact = harness(options);
+    exact.input.dispatch(trusted.tap());
+    exact.time.advanceBy(max);
+    assert.deepEqual(exact.lifecycle.consumeGesture(), { phaseBefore: "HABITAT_IDLE" }, `exactly ${max}ms`);
+
+    const over = harness(options);
+    over.input.dispatch(trusted.tap());
+    over.time.advanceBy(max + 1);
+    assert.equal(over.lifecycle.consumeGesture(), null, `${max + 1}ms`);
+  }
+});
+
+test("LF4. a NaN age is rejected", () => {
+  const { input, lifecycle, setClock } = clockControlledLifecycle();
+  input.dispatch(trusted.tap());
+  setClock(Number.NaN);
+  assert.equal(lifecycle.consumeGesture(), null);
+});
+
+test("LF5. a negative age (a clock that went backwards) is rejected; age exactly 0 is accepted", () => {
+  const zero = clockControlledLifecycle();
+  zero.input.dispatch(trusted.tap());
+  assert.deepEqual(zero.lifecycle.consumeGesture(), { phaseBefore: "HABITAT_IDLE" }, "age 0");
+
+  const backwards = clockControlledLifecycle();
+  backwards.input.dispatch(trusted.tap());
+  backwards.setClock(backwards.time.now() - 1);
+  assert.equal(backwards.lifecycle.consumeGesture(), null, "age -1");
+
+  const wayBack = clockControlledLifecycle();
+  wayBack.input.dispatch(trusted.tap());
+  wayBack.setClock(-Infinity);
+  assert.equal(wayBack.lifecycle.consumeGesture(), null, "-Infinity");
+  const wayForward = clockControlledLifecycle();
+  wayForward.input.dispatch(trusted.tap());
+  wayForward.setClock(Infinity);
+  assert.equal(wayForward.lifecycle.consumeGesture(), null, "+Infinity");
+});
+
+test("LF6. the latch is one-shot: a consume clears it, and so does a REFUSED consume (a refusal is final)", () => {
+  const fresh = harness();
+  fresh.input.dispatch(trusted.tap());
+  assert.deepEqual(fresh.lifecycle.consumeGesture(), { phaseBefore: "HABITAT_IDLE" });
+  assert.equal(fresh.lifecycle.consumeGesture(), null);
+
+  const { time, input, lifecycle, setClock } = clockControlledLifecycle();
+  input.dispatch(trusted.tap());
+  setClock(time.now() + 5_000); // stale
+  assert.equal(lifecycle.consumeGesture(), null);
+  setClock(null); // the clock is fresh again - the latch must still be gone
+  assert.equal(lifecycle.consumeGesture(), null);
+});
+
+test("LF7. a newer press overwrites the previous latch and restarts the age from the NEW press", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap()); // press 1: from Habitat
+  time.advanceBy(1_500);
+  input.dispatch(trusted.tap()); // press 2: at ACTIVE_STANDBY
+  time.advanceBy(1_900); // 3.4s since press 1 (stale for it), 1.9s since press 2 (fresh)
+  assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "ACTIVE_STANDBY" });
+});
+
+test("LF8. a script click or a trusted click carrying an OLD latch is rejected; a fresh trusted click is not", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  time.advanceBy(5_000);
+
+  const consume = () => lifecycle.consumeGesture();
+  assert.equal(resolveHomeActivation({ isTrusted: false }, consume), null, "an untrusted click never even reads the latch");
+  assert.equal(resolveHomeActivation({ isTrusted: true }, consume), null, "a trusted click with a stale latch finds nothing");
+  assert.equal(resolveHomeActivation({ isTrusted: true }, consume), null, "and the refusal was final");
+
+  input.dispatch(trusted.tap()); // a new, fresh press
+  time.advanceBy(300);
+  assert.deepEqual({ ...resolveHomeActivation({ isTrusted: true }, consume)! }, { phaseBefore: "ACTIVE_STANDBY" });
+});
+
+test("LF9. no listener is added: still exactly the five capture listeners, however many presses and consumes happen", () => {
+  const { time, input, lifecycle } = harness();
+  const before = input.registrations();
+  assert.equal(before.length, 5);
+  for (let i = 0; i < 5; i++) {
+    input.dispatch(trusted.tap());
+    time.advanceBy(3_000);
+    lifecycle.consumeGesture();
+  }
+  const after = input.registrations();
+  assert.equal(input.totalRegistrations(), 5);
+  assert.equal(input.activeListenerCount(), 5);
+  assert.deepEqual(after.map((r) => r.type).sort(), [...CUSTOMER_INPUT_EVENT_TYPES].sort());
+  assert.ok(after.every((r) => r.capture && r.passive && r.hasSignal && r.active));
+});
+
+test("LF10. the press time is read BEFORE the timer runs: slow downstream work makes the latch older, never younger", () => {
+  for (const [downstreamMs, accepted] of [
+    [1_500, true],
+    [2_500, false],
+  ] as const) {
+    const time = createFakeTime();
+    const input = createFakeInputTarget();
+    const lifecycle = createExperienceLifecycle({
+      clock: time.clock,
+      scheduler: time.scheduler,
+      inputTarget: input.target,
+      snapshots: { getSnapshot: () => IDLE_READY },
+      presentation: { returnToWorld: () => {} },
+      world: { isOrdering: () => false },
+      // A phase callback runs inside timer.noteCustomerInput(): the press "takes a while".
+      onPhase: (phase) => {
+        if (phase === "ACTIVE_STANDBY") time.jumpBy(downstreamMs);
+      },
+    });
+    lifecycle.start();
+
+    input.dispatch(trusted.tap());
+
+    const gesture = lifecycle.consumeGesture();
+    if (accepted) assert.deepEqual(gesture, { phaseBefore: "HABITAT_IDLE" }, `${downstreamMs}ms of downstream work`);
+    else assert.equal(gesture, null, `${downstreamMs}ms of downstream work must count against the latch`);
+  }
+});
+
+test("LF11. the default maximum is exactly 2000 ms, and it is the one applied when none is configured", () => {
+  assert.equal(DEFAULT_GESTURE_MAX_AGE_MS, 2000);
+  const accepted = harness();
+  accepted.input.dispatch(trusted.tap());
+  accepted.time.advanceBy(2000);
+  assert.notEqual(accepted.lifecycle.consumeGesture(), null);
+  const rejected = harness();
+  rejected.input.dispatch(trusted.tap());
+  rejected.time.advanceBy(2001);
+  assert.equal(rejected.lifecycle.consumeGesture(), null);
+});
+
+test("LF12. an injected maximum is honoured (tight and loose), and an invalid one is rejected at construction", () => {
+  const tight = harness({ gestureMaxAgeMs: 100 });
+  tight.input.dispatch(trusted.tap());
+  tight.time.advanceBy(101);
+  assert.equal(tight.lifecycle.consumeGesture(), null);
+
+  const loose = harness({ gestureMaxAgeMs: 10_000 });
+  loose.input.dispatch(trusted.tap());
+  loose.time.advanceBy(9_000);
+  assert.notEqual(loose.lifecycle.consumeGesture(), null);
+
+  const build = (gestureMaxAgeMs: unknown) => {
+    const time = createFakeTime();
+    const input = createFakeInputTarget();
+    const lifecycle = createExperienceLifecycle({
+      clock: time.clock,
+      scheduler: time.scheduler,
+      inputTarget: input.target,
+      snapshots: { getSnapshot: () => IDLE_READY },
+      presentation: { returnToWorld: () => {} },
+      world: { isOrdering: () => false },
+      gestureMaxAgeMs: gestureMaxAgeMs as number,
+    });
+    return { lifecycle, input, time };
+  };
+  for (const invalid of [0, -1, -0.001, Number.NaN, Infinity, -Infinity, null, "2000", true, {}, []]) {
+    assert.throws(() => build(invalid), RangeError, `must reject ${String(invalid)}`);
+  }
+  for (const valid of [undefined, 0.5, 1, 2000, 60_000]) {
+    assert.doesNotThrow(() => build(valid), `must accept ${String(valid)}`);
+  }
+  // Rejection happens before anything is bound.
+  const probe = (() => {
+    const time = createFakeTime();
+    const input = createFakeInputTarget();
+    try {
+      createExperienceLifecycle({
+        clock: time.clock,
+        scheduler: time.scheduler,
+        inputTarget: input.target,
+        snapshots: { getSnapshot: () => IDLE_READY },
+        presentation: { returnToWorld: () => {} },
+        world: { isOrdering: () => false },
+        gestureMaxAgeMs: 0,
+      });
+    } catch {
+      // expected
+    }
+    return { registrations: input.totalRegistrations(), pending: time.pendingCount() };
+  })();
+  assert.deepEqual(probe, { registrations: 0, pending: 0 });
+});
+
+test("LF13. the existing press paths are intact: tap, Enter and Space each latch and are consumed fresh", () => {
+  for (const press of [
+    () => trusted.tap(),
+    () => trusted.enterOnButton(),
+    () => makeEvent("keydown", { key: " ", repeat: false, target: { tagName: "BUTTON" } }),
+  ]) {
+    const { time, input, lifecycle } = harness();
+    input.dispatch(trusted.tap());
+    lifecycle.consumeGesture();
+    time.jumpBy(30_000);
+    input.dispatch(press());
+    time.advanceBy(250);
+    assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "RELEASED" });
+  }
+});
+
+test("LF14. freshness is measured from the PRESS: a later drag or wheel does not extend it", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  time.advanceBy(1_500);
+  input.dispatch(trusted.drag());
+  input.dispatch(trusted.touchSwipe());
+  input.dispatch(trusted.wheel());
+  time.advanceBy(1_000); // 2.5s since the press, 1s since the last drag/wheel
+  assert.equal(lifecycle.consumeGesture(), null);
+});
+
+test("LF15. a stale latch is refused even when a later, unrelated input keeps the silence window alive", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap()); // the press whose click never arrives
+  time.advanceBy(3_000);
+  input.dispatch(trusted.hover()); // hover is not input at all
+  input.dispatch(makeEvent("scroll"));
+  assert.equal(lifecycle.consumeGesture(), null);
 });

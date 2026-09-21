@@ -25,6 +25,16 @@
 // `click` arrives the press has already reset the window. It is data only: a
 // phase name, no Domain handle, no callback.
 //
+// Freshness (fail closed): the latch also remembers WHEN the press happened, on
+// the injected monotonic clock, read BEFORE the timer processes the press so
+// that slow downstream work can never make the latch look younger than it is.
+// consumeGesture() honours it only while 0 <= age <= gestureMaxAgeMs (default
+// DEFAULT_GESTURE_MAX_AGE_MS). A stale latch, a negative age (a clock that went
+// backwards) and a NaN age are all refused - and the latch is cleared in every
+// case, so a refusal is final. A trusted click that is not preceded by a fresh
+// press (for example an assistive-technology activation) therefore finds
+// nothing. This is an Experience-only ergonomics bound, not a business timeout.
+//
 // The returned object exposes only start / dispose / getPhase / consumeGesture.
 // The sink that carries customer input is created here and given to the input
 // adapter and to nobody else; it is never returned.
@@ -41,6 +51,10 @@ import type { WakeDecision } from "./pendingTicket.ts";
 import { createSilenceTimer } from "./silenceTimer.ts";
 import type { TimerTransition } from "./silenceTimer.ts";
 
+// How long a latched press stays valid for consumeGesture(): the longest
+// tolerated gap between a customer's press and the click it leads to.
+export const DEFAULT_GESTURE_MAX_AGE_MS = 2000;
+
 // Read-only probe of AWR's presentation mode. Supplied by the Composition
 // root, which owns AWR's state; the lifecycle never sees AWR itself.
 export interface WorldPresentationProbe {
@@ -55,6 +69,9 @@ export interface ExperienceLifecycleOptions {
   readonly presentation: PresentationOutPort;
   readonly world: WorldPresentationProbe;
   readonly thresholds?: InteractionThresholds;
+  // Freshness bound for the phase-before-input latch, in milliseconds. Must be
+  // a positive, finite number; anything else is rejected at construction.
+  readonly gestureMaxAgeMs?: number;
   readonly isInteractiveTarget?: InteractiveTargetPredicate;
   // Presentation-only callback: every phase entered, in order (including the
   // transient CONTEXT_EXPIRED). For the future shell; carries no business data.
@@ -73,13 +90,30 @@ export interface ExperienceLifecycle {
   start(): void;
   dispose(): void;
   getPhase(): RestingPhase;
-  // The latched press, once: the first call after a press returns it, every
-  // later call returns null until the next press.
+  // The latched press, once and only while it is fresh: the first call after a
+  // press returns it if the press was at most gestureMaxAgeMs ago; every later
+  // call, and any call for a stale press, returns null until the next press.
   consumeGesture(): HomeGesture | null;
+}
+
+// What the lifecycle remembers about the latest press. Internal: the public
+// HomeGesture still carries only the phase.
+interface LatchedPress {
+  readonly phaseBefore: RestingPhase;
+  // Monotonic time of the press, read before the timer processed it.
+  readonly at: number;
 }
 
 export function createExperienceLifecycle(options: ExperienceLifecycleOptions): ExperienceLifecycle {
   const { clock, scheduler, inputTarget, snapshots, presentation, world, onPhase, onWake, onError } = options;
+
+  // Reject a bad freshness bound up front, before anything is built or bound.
+  // `undefined` means "use the default"; anything else must be a positive finite
+  // number (so null, NaN, Infinity, 0, negatives and non-numbers all throw).
+  const gestureMaxAgeMs = options.gestureMaxAgeMs === undefined ? DEFAULT_GESTURE_MAX_AGE_MS : options.gestureMaxAgeMs;
+  if (typeof gestureMaxAgeMs !== "number" || !Number.isFinite(gestureMaxAgeMs) || gestureMaxAgeMs <= 0) {
+    throw new RangeError("gestureMaxAgeMs must be a positive, finite number of milliseconds");
+  }
 
   let started = false;
   let disposed = false;
@@ -138,27 +172,38 @@ export function createExperienceLifecycle(options: ExperienceLifecycleOptions): 
     onError: report,
   });
 
-  // The latched phase-before-input of the most recent press, or null.
-  let gesture: HomeGesture | null = null;
+  // The most recent press (its phase-before-input and when it happened), or null.
+  let gesture: LatchedPress | null = null;
 
   // The only holder of customer input authority besides the timer itself.
   const sink = Object.freeze({
     noteCustomerInput: (kind?: CustomerInputKind): void => {
+      // The press time is read BEFORE the timer processes the input, so whatever
+      // the timer and its callbacks then spend can only make the latch look OLDER,
+      // never younger. Only a press needs it.
+      const pressAt = kind === "press" ? clock.now() : 0;
       // A new press replaces whatever an earlier press latched - cleared BEFORE
       // the timer runs, so a callback fired by this very input can never read
       // the previous press's phase.
       if (kind === "press") gesture = null;
       const observation = timer.noteCustomerInput(kind);
       if (kind === "press" && observation !== null) {
-        gesture = Object.freeze({ phaseBefore: observation.phaseBefore });
+        gesture = Object.freeze({ phaseBefore: observation.phaseBefore, at: pressAt });
       }
     },
   });
 
   function consumeGesture(): HomeGesture | null {
+    // One-shot: cleared first, so every outcome below - including a refusal - is final.
     const latched = gesture;
     gesture = null;
-    return latched;
+    if (latched === null) return null;
+
+    // Fail closed. NaN fails every comparison, so it needs its own check.
+    const age = clock.now() - latched.at;
+    if (Number.isNaN(age) || age < 0 || age > gestureMaxAgeMs) return null;
+
+    return Object.freeze({ phaseBefore: latched.phaseBefore });
   }
 
   function dispose(): void {

@@ -55,7 +55,9 @@ const FORBIDDEN_CLOCK_PATTERNS: ReadonlyArray<{ readonly label: string; readonly
   { label: "requestAnimationFrame", regex: /\brequestAnimationFrame\b/ },
   { label: "TICK", regex: /\bTICK\b/ },
   { label: "deltaMs", regex: /\bdeltaMs\b/ },
-  { label: "persistence expiry (MaxAgeMs)", regex: /\b\w*MaxAgeMs\b/ },
+  // Every *MaxAgeMs is a persistence-expiry option (cartDraftMaxAgeMs, ...) EXCEPT the
+  // Experience-only gesture freshness bound, which is not a persistence expiry.
+  { label: "persistence expiry (MaxAgeMs)", regex: /\b(?!gestureMaxAgeMs\b)\w*MaxAgeMs\b/ },
   { label: "expiryOptions", regex: /\bexpiryOptions\b/ },
   { label: "writtenAt", regex: /\bwrittenAt\b/ },
   { label: "committedAt", regex: /\bcommittedAt\b/ },
