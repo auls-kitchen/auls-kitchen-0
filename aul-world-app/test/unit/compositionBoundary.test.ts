@@ -122,7 +122,7 @@ test("CB4. it imports no Kiosk code of any kind (the host arrives by injection)"
 
 test("CB5. no lifecycle, shell or contract file mentions `host` or imports AWR or the Kiosk", () => {
   const others = walk(SRC_ROOT).filter((f) => f !== COMPOSITION);
-  assert.equal(others.length, 8, "expected exactly the 8 U0-U3 non-composition source files");
+  assert.equal(others.length, 9, "expected exactly the 8 U0-U3 non-composition source files plus U4 Slice 2A's takeoverPolicy.ts");
   for (const file of others) {
     const code = stripComments(read(file));
     assert.equal(/\bhost\b/.test(code), false, `${file} names a host`);
@@ -151,12 +151,37 @@ test("CB7. the shell names no Domain capability at all, imports only inside src,
   }
 });
 
-test("CB8. the shell's only interactive control asks AWR for its menu; it has no Domain callback", () => {
+test("CB8. the shell's only interactive controls are Menu (asks AWR for its menu) and Home/X (reports the phase before the press); neither has a Domain callback", () => {
   const code = stripComments(read("shell/experienceShell.ts"));
-  assert.equal([...code.matchAll(/createElement\(\s*["']button["']\s*\)/g)].length, 1, "exactly one button");
-  // Its whole output surface is the single onMenu callback the Composition supplies.
+  assert.equal([...code.matchAll(/createElement\(\s*["']button["']\s*\)/g)].length, 2, "exactly two buttons");
+  assert.deepEqual(
+    [...code.matchAll(/setAttribute\(\s*["']data-shell-action["']\s*,\s*["'](\w+)["']\s*\)/g)].map((m) => m[1]).sort(),
+    ["home", "menu"],
+  );
+  // Its whole output surface: the two callbacks the Composition supplies, and the one-shot latch it reads.
   const options = code.match(/export interface ExperienceShellOptions \{([\s\S]*?)\}/)![1]!;
-  assert.deepEqual([...options.matchAll(/readonly (\w+):/g)].map((m) => m[1]).sort(), ["domainStatus", "onMenu"]);
+  assert.deepEqual([...options.matchAll(/readonly (\w+):/g)].map((m) => m[1]).sort(), ["consumeGesture", "domainStatus", "onHome", "onMenu"]);
+  // What Home hands over is a phase and nothing else.
+  const model = stripComments(read("shell/shellModel.ts"));
+  const request = model.match(/export interface HomeRequest \{([\s\S]*?)\}/)![1]!;
+  assert.deepEqual([...request.matchAll(/readonly (\w+):/g)].map((m) => m[1]), ["phaseBefore"]);
+});
+
+test("CB12. Slice 2A: the Composition's Home boundary reads one snapshot, applies the pure policy, and records the decision - nothing else", () => {
+  const code = stripComments(read(COMPOSITION));
+  const start = code.indexOf("onHome: (request) => {");
+  const end = code.indexOf("cleanups.push(() => shell.dispose())");
+  assert.ok(start > 0 && end > start, "the onHome boundary must be found");
+  const boundary = code.slice(start, end);
+
+  assert.equal([...code.matchAll(/\bdecideTakeover\s*\(/g)].length, 1, "one call site for the policy");
+  for (const required of ["snapshots.getSnapshot()", "decideTakeover(", "options.onHomeDecision?.(decision)"]) {
+    assert.ok(boundary.includes(required), `the boundary must contain ${required}`);
+  }
+  // No Domain, no AWR bus, no shell, no routing, no world change from a Home activation.
+  for (const forbidden of ["host", "bus", "shell.", "setWake", "setPhase", "routeCustomerReturn", "returnToWorld", "MENU_INTENT", "RETURN_TO_WORLD", "RESET_WORLD"]) {
+    assert.equal(boundary.includes(forbidden), false, `the Home boundary must not touch ${forbidden}`);
+  }
 });
 
 // ============================================================

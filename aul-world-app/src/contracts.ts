@@ -40,10 +40,15 @@ export interface PresentationOutPort {
   returnToWorld(): void;
 }
 
+// What kind of physical customer input this was. Only a `press` starts a new
+// gesture (a tap/click, or Enter/Space on an interactive element); `drag` (a
+// pressed pointer or touch moving) and `wheel` continue or accompany one.
+export type CustomerInputKind = "press" | "drag" | "wheel";
+
 // The single input the lifecycle exposes to the customer-input adapter.
 // Nothing else (bus observers, Domain subscribers) is ever given this.
 export interface InputSink {
-  noteCustomerInput(): void;
+  noteCustomerInput(kind?: CustomerInputKind): void;
 }
 
 // Monotonic elapsed-time source, in milliseconds. Never a wall clock.

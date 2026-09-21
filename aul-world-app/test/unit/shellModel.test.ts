@@ -4,7 +4,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { initialShellState, shellAttributes, viewForRoute, withHabitat, withWake } from "../../src/shell/shellModel.ts";
+import { initialShellState, resolveHomeActivation, shellAttributes, viewForRoute, withHabitat, withWake } from "../../src/shell/shellModel.ts";
 import type { ShellState } from "../../src/shell/shellModel.ts";
 
 test("S1. each wake route maps to exactly one view", () => {
@@ -82,4 +82,79 @@ test("S7. numeric mirrors are stringified", () => {
   const attributes = shellAttributes(state);
   assert.equal(attributes["data-aul-interactions"], "7");
   assert.equal(attributes["data-world-frame"], "1234");
+});
+
+// ============================================================
+// Home/X activation gate (U4 Slice 2A)
+// ============================================================
+
+function latch(phaseBefore: string | undefined) {
+  const calls = { count: 0 };
+  return {
+    calls,
+    consume: () => {
+      calls.count += 1;
+      return phaseBefore === undefined ? null : ({ phaseBefore } as { phaseBefore: never });
+    },
+  };
+}
+
+test("S8. a trusted click with a latched press yields exactly that phase, consuming the latch once", () => {
+  for (const phase of ["ACTIVE_STANDBY", "SPACE_GIVEN", "RELEASED", "HABITAT_IDLE"]) {
+    const { calls, consume } = latch(phase);
+    assert.deepEqual(resolveHomeActivation({ isTrusted: true }, consume), { phaseBefore: phase });
+    assert.equal(calls.count, 1);
+  }
+});
+
+test("S9. an untrusted click does NOTHING and never even touches the latch (script .click(), dispatched clicks)", () => {
+  for (const event of [{ isTrusted: false }, {}, { isTrusted: undefined }, { isTrusted: "true" as unknown as boolean }, { isTrusted: 1 as unknown as boolean }, null, undefined]) {
+    const { calls, consume } = latch("RELEASED");
+    assert.equal(resolveHomeActivation(event, consume), null, JSON.stringify(event));
+    assert.equal(calls.count, 0, "the latch was not consumed by an untrusted click");
+  }
+});
+
+test("S10. a trusted click with NO latched press does nothing", () => {
+  const { calls, consume } = latch(undefined);
+  assert.equal(resolveHomeActivation({ isTrusted: true }, consume), null);
+  assert.equal(calls.count, 1);
+  assert.equal(resolveHomeActivation({ isTrusted: true }, () => undefined), null);
+});
+
+test("S11. a malformed latch is no latch: missing or non-string phase", () => {
+  for (const junk of [{}, { phaseBefore: 5 }, { phaseBefore: null }, { phaseBefore: undefined }, 7, "RELEASED", true]) {
+    assert.equal(resolveHomeActivation({ isTrusted: true }, () => junk as never), null, JSON.stringify(junk));
+  }
+});
+
+test("S12. a latch reader that throws is no latch: the click is dropped, the error does not escape into the DOM handler", () => {
+  assert.equal(
+    resolveHomeActivation({ isTrusted: true }, () => {
+      throw new Error("latch unreadable");
+    }),
+    null,
+  );
+});
+
+test("S13. the request is frozen and carries ONLY the phase - nothing else the latch held", () => {
+  const request = resolveHomeActivation({ isTrusted: true }, () => ({ phaseBefore: "RELEASED", cart: ["x"], ownerUid: "u" }) as never);
+  assert.ok(Object.isFrozen(request));
+  assert.deepEqual(Object.keys(request!), ["phaseBefore"]);
+});
+
+test("S14. the latch is one-shot end to end: a second click with the same reader gets nothing once it is consumed", () => {
+  let latched: { phaseBefore: "RELEASED" } | null = { phaseBefore: "RELEASED" };
+  const consume = () => {
+    const value = latched;
+    latched = null;
+    return value;
+  };
+  assert.deepEqual(resolveHomeActivation({ isTrusted: true }, consume), { phaseBefore: "RELEASED" });
+  assert.equal(resolveHomeActivation({ isTrusted: true }, consume), null);
+});
+
+test("S15. entering Habitat / waking never fabricates a Home request: the shell state has no Home field at all", () => {
+  const state = withWake(initialShellState("READY"), { route: "DISCOVER_MENU", pending: "NONE" });
+  assert.equal(JSON.stringify(shellAttributes(state)).toLowerCase().includes("home"), false);
 });

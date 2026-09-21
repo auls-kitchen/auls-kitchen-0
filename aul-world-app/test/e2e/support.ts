@@ -86,7 +86,9 @@ export async function attribute(page: Page, name: string): Promise<string> {
 export const phase = (page: Page) => attribute(page, "data-interaction-phase");
 
 export const events = (page: Page) =>
-  page.evaluate(() => (window as any).__u3.events() as { phases: string[]; wakes: Array<{ route: string; pending: string }>; errors: string[] });
+  page.evaluate(
+    () => (window as any).__u3.events() as { phases: string[]; wakes: Array<{ route: string; pending: string }>; homeDecisions: string[]; errors: string[] },
+  );
 
 export const counters = (page: Page) => page.evaluate(() => (window as any).__u3.counters());
 

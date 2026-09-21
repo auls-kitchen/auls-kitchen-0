@@ -450,3 +450,154 @@ test("T26. real clock + real timeouts (scaled thresholds): full timeline, each p
   assert.ok(at("RELEASED") >= 60, `RELEASED came at ${at("RELEASED")}ms`);
   assert.ok(at("HABITAT_IDLE") >= 150, `HABITAT_IDLE came at ${at("HABITAT_IDLE")}ms`);
 });
+
+// ============================================================
+// Evaluate-before-input (U4 Slice 2A): the phase an input finds is decided by
+// ELAPSED monotonic time, never by whether a late timeout fired first.
+// ============================================================
+
+test("T27. an input reports the phase it found, from elapsed time: 10s ACTIVE_STANDBY, 20s SPACE_GIVEN, 26s RELEASED", () => {
+  for (const [elapsed, expected] of [
+    [10_000, "ACTIVE_STANDBY"],
+    [20_000, "SPACE_GIVEN"],
+    [26_000, "RELEASED"],
+  ] as const) {
+    const { time, timer } = harness();
+    timer.noteCustomerInput();
+    time.advanceBy(elapsed); // a punctual scheduler
+    assert.deepEqual(timer.noteCustomerInput(), { phaseBefore: expected }, `${elapsed}ms`);
+    assert.equal(timer.getState().phase, "ACTIVE_STANDBY", "the input then restarts the window");
+  }
+});
+
+test("T28. the boundaries are exact and inclusive: 14.999s / 15s and 24.999s / 25s", () => {
+  for (const [elapsed, expected] of [
+    [14_999, "ACTIVE_STANDBY"],
+    [15_000, "SPACE_GIVEN"],
+    [24_999, "SPACE_GIVEN"],
+    [25_000, "RELEASED"],
+    [299_999, "RELEASED"],
+  ] as const) {
+    const { time, timer } = harness();
+    timer.noteCustomerInput();
+    time.jumpBy(elapsed); // late scheduler: nothing has fired
+    assert.equal(timer.noteCustomerInput()?.phaseBefore, expected, `${elapsed}ms`);
+  }
+});
+
+test("T29. LATE TIMER: 30s of silence, the 25s callback has NOT fired - the input still finds RELEASED, and the missed phases are reported in order first", () => {
+  const { time, timer, transitions } = harness();
+  timer.noteCustomerInput();
+  time.jumpBy(30_000);
+  assert.equal(time.pendingCount(), 1, "a timeout is pending and overdue");
+  assert.equal(timer.getState().phase, "ACTIVE_STANDBY", "the timer has not caught up on its own");
+  transitions.length = 0;
+
+  const observation = timer.noteCustomerInput();
+
+  assert.deepEqual(observation, { phaseBefore: "RELEASED" });
+  assert.deepEqual(
+    transitions.map((t) => [t.phase, t.cause]),
+    [
+      ["SPACE_GIVEN", "SILENCE"],
+      ["RELEASED", "SILENCE"],
+      ["ACTIVE_STANDBY", "CUSTOMER_INPUT"],
+    ],
+    "evaluated first, then the input",
+  );
+  assert.equal(timer.getState().phase, "ACTIVE_STANDBY");
+  assert.equal(time.pendingCount(), 1, "exactly one fresh 15s timeout; the overdue one is gone");
+});
+
+test("T30. LATE TIMER past 5 minutes: the expiry is delivered BEFORE the wake, and the input reports HABITAT_IDLE", () => {
+  const { time, timer, transitions } = harness();
+  timer.noteCustomerInput();
+  time.jumpBy(360_000);
+  transitions.length = 0;
+
+  const observation = timer.noteCustomerInput();
+
+  assert.deepEqual(observation, { phaseBefore: "HABITAT_IDLE" });
+  assert.deepEqual(
+    transitions.map((t) => [t.phase, t.cause, t.wokeFromHabitat]),
+    [
+      ["SPACE_GIVEN", "SILENCE", false],
+      ["RELEASED", "SILENCE", false],
+      ["CONTEXT_EXPIRED", "SILENCE", false],
+      ["HABITAT_IDLE", "SILENCE", false],
+      ["ACTIVE_STANDBY", "CUSTOMER_INPUT", true],
+    ],
+  );
+  assert.equal(time.pendingCount(), 1);
+});
+
+test("T31. an input at HABITAT_IDLE reports HABITAT_IDLE and wakes; only INPUT ever wakes (an evaluation alone never does)", () => {
+  const woken = harness();
+  assert.deepEqual(woken.timer.noteCustomerInput(), { phaseBefore: "HABITAT_IDLE" });
+  assert.deepEqual(woken.transitions, [{ phase: "ACTIVE_STANDBY", cause: "CUSTOMER_INPUT", wokeFromHabitat: true }]);
+
+  const silent = harness();
+  silent.time.advanceBy(3_600_000);
+  silent.time.fireDue();
+  assert.equal(silent.timer.getState().phase, "HABITAT_IDLE");
+  assert.deepEqual(silent.transitions, []);
+});
+
+test("T32. evaluating first adds no scheduling churn when nothing was crossed: one timeout per input, as before", () => {
+  const { time, timer } = harness();
+  timer.noteCustomerInput();
+  assert.deepEqual(time.scheduledDelays(), [15_000]);
+  time.advanceBy(5_000);
+  timer.noteCustomerInput(); // nothing crossed
+  timer.noteCustomerInput();
+  assert.equal(time.scheduledDelays().length, 3, "exactly one schedule per input");
+  assert.equal(time.pendingCount(), 1);
+});
+
+test("T33. the input kind never changes what the timer does: press, drag, wheel and no kind are identical", () => {
+  const outcomes = ([undefined, "press", "drag", "wheel"] as const).map((kind) => {
+    const { time, timer, transitions } = harness();
+    timer.noteCustomerInput();
+    time.jumpBy(30_000);
+    const observation = timer.noteCustomerInput(kind);
+    return JSON.stringify({ observation, phases: transitions.map((t) => t.phase), state: timer.getState().phase, pending: time.pendingCount() });
+  });
+  assert.equal(new Set(outcomes).size, 1, outcomes.join(" | "));
+});
+
+test("T34. an ignored input returns null: before start() and after dispose()", () => {
+  const time = createFakeTime();
+  const timer = createSilenceTimer({ clock: time.clock, scheduler: time.scheduler, onTransition: () => {} });
+  assert.equal(timer.noteCustomerInput("press"), null, "before start");
+  timer.start();
+  assert.deepEqual(timer.noteCustomerInput("press"), { phaseBefore: "HABITAT_IDLE" });
+  timer.dispose();
+  assert.equal(timer.noteCustomerInput("press"), null, "after dispose");
+});
+
+test("T35. a callback that disposes the timer during the evaluation stops the input: null, and no wake is delivered", () => {
+  const time = createFakeTime();
+  const seen: InteractionPhase[] = [];
+  const timer: SilenceTimer = createSilenceTimer({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    onTransition: (t) => {
+      seen.push(t.phase);
+      if (t.phase === "RELEASED") timer.dispose();
+    },
+  });
+  timer.start();
+  timer.noteCustomerInput();
+  time.jumpBy(400_000);
+  seen.length = 0;
+
+  assert.equal(timer.noteCustomerInput("press"), null);
+  assert.deepEqual(seen, ["SPACE_GIVEN", "RELEASED"], "nothing after the dispose: no expiry, no wake");
+});
+
+test("T36. the observation is frozen and carries only the phase", () => {
+  const { timer } = harness();
+  const observation = timer.noteCustomerInput("press");
+  assert.ok(Object.isFrozen(observation));
+  assert.deepEqual(Object.keys(observation!), ["phaseBefore"]);
+});

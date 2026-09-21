@@ -18,6 +18,14 @@
 //     move a phase forward through silence; it can never wake HABITAT_IDLE and
 //     never restart the silence window.
 //
+// Evaluate-before-input: noteCustomerInput() first evaluates the silence that
+// has ELAPSED on the monotonic clock, and only then applies the input. So the
+// phase an input finds is decided by elapsed time, never by whether a (possibly
+// late) timeout happened to fire first: a context that had been silent for 30s
+// is RELEASED when the customer touches, even if the 25s callback is overdue.
+// It returns that phase (the phase BEFORE the input restarted the window) so
+// the lifecycle can latch it; the timer itself keeps nothing but its state.
+//
 // Scheduling: exactly one timeout is pending at a time, aimed at the next
 // threshold. On every fire the phase is recomputed from elapsed monotonic
 // time (not from "the timer fired"), so a late fire (a throttled background
@@ -27,9 +35,9 @@
 // scheduled BEFORE callbacks run, so a throwing or re-entrant callback can
 // never leave the timer without its next deadline.
 
-import type { Clock, InputSink, Scheduler } from "../contracts.ts";
+import type { Clock, CustomerInputKind, InputSink, Scheduler } from "../contracts.ts";
 import { DEFAULT_THRESHOLDS, assertValidThresholds, createInitialInteractionState, reduceInteraction } from "./interactionContext.ts";
-import type { InteractionPhase, InteractionState, InteractionStep, InteractionThresholds } from "./interactionContext.ts";
+import type { InteractionPhase, InteractionState, InteractionStep, InteractionThresholds, RestingPhase } from "./interactionContext.ts";
 
 // Longest delay a platform timeout can hold (2^31 - 1 ms). A longer wait is
 // scheduled in slices; each slice's fire re-evaluates and reschedules.
@@ -52,12 +60,20 @@ export interface SilenceTimerOptions {
   readonly onError?: (error: unknown) => void;
 }
 
+// What one customer input found: the resting phase the silence clock had reached
+// at that instant, from elapsed monotonic time, BEFORE the input restarted it.
+export interface InputObservation {
+  readonly phaseBefore: RestingPhase;
+}
+
 // A SilenceTimer is an InputSink: noteCustomerInput() is what a customer-input
-// adapter calls. Nothing else in the lifecycle is given this object.
+// adapter calls. Nothing else in the lifecycle is given this object. It returns
+// null when the input was ignored (before start() or after dispose()).
 export interface SilenceTimer extends InputSink {
   start(): void;
   dispose(): void;
   getState(): InteractionState;
+  noteCustomerInput(kind?: CustomerInputKind): InputObservation | null;
 }
 
 // Monotonic elapsed-time source: performance.now(). Deliberately not
@@ -168,11 +184,28 @@ export function createSilenceTimer(options: SilenceTimerOptions): SilenceTimer {
       started = true;
     },
 
-    noteCustomerInput(): void {
+    noteCustomerInput(_kind?: CustomerInputKind): InputObservation | null {
       // Input before start() or after dispose() is ignored.
-      if (!started || disposed) return;
-      const before = state;
-      apply(before, reduceInteraction(before, { type: "CUSTOMER_INPUT", at: clock.now() }, thresholds), "CUSTOMER_INPUT");
+      if (!started || disposed) return null;
+      // One reading of the monotonic clock serves both steps.
+      const at = clock.now();
+
+      // 1. Evaluate the silence that has already elapsed. Only a step that
+      //    actually crossed a threshold is applied, so an input that finds the
+      //    phase current costs no extra scheduling.
+      const beforeEvaluate = state;
+      const evaluation = reduceInteraction(beforeEvaluate, { type: "EVALUATE", at }, thresholds);
+      if (evaluation.transitions.length > 0) {
+        apply(beforeEvaluate, evaluation, "SILENCE");
+        // A callback may have disposed the timer.
+        if (disposed) return null;
+      }
+      const phaseBefore = state.phase;
+
+      // 2. Apply the input: it restarts the window (and wakes HABITAT_IDLE).
+      const beforeInput = state;
+      apply(beforeInput, reduceInteraction(beforeInput, { type: "CUSTOMER_INPUT", at }, thresholds), "CUSTOMER_INPUT");
+      return Object.freeze({ phaseBefore });
     },
 
     dispose(): void {

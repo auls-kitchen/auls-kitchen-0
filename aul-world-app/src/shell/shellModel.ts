@@ -11,7 +11,7 @@
 // the "ownership" view is an inert marker for the deferred U4 confirmation UI,
 // and no view can end a session, clear a cart, or retry an order.
 
-import type { InteractionPhase } from "../experience/interactionContext.ts";
+import type { InteractionPhase, RestingPhase } from "../experience/interactionContext.ts";
 import type { WakeDecision, WakeRoute } from "../experience/pendingTicket.ts";
 
 // habitat    : no customer context is being served (boot, and after expiry)
@@ -70,6 +70,37 @@ export function withWake(state: ShellState, decision: WakeDecision): ShellState 
 // the Domain: the last wake route is dropped from the shell, that is all.
 export function withHabitat(state: ShellState): ShellState {
   return Object.freeze({ ...state, view: "habitat", wakeRoute: "", pending: "" });
+}
+
+// A customer's Home/X activation, as the shell hands it to the Composition:
+// the phase the Experience was in BEFORE the press that started the gesture.
+// It carries a phase name and nothing else - no Domain data, no handle.
+export interface HomeRequest {
+  readonly phaseBefore: RestingPhase;
+}
+
+// Structurally the lifecycle's latched press; the shell only needs its phase.
+export type ConsumeGesture = () => HomeRequest | null | undefined;
+
+// The Home/X activation gate - pure, DOM-free, and the shell's ONLY rule for
+// turning a `click` into a request. It fails closed:
+//   - an event that is not `isTrusted === true` (a script's .click() or a
+//     dispatched click) does nothing, and does not even touch the latch;
+//   - a trusted click with no latched press (nothing a customer pressed just
+//     before it) does nothing;
+//   - otherwise it consumes the latched press exactly once and returns only its
+//     phase.
+// It never reads or calls anything from the Domain.
+export function resolveHomeActivation(event: { readonly isTrusted?: boolean } | null | undefined, consumeGesture: ConsumeGesture): HomeRequest | null {
+  if (!event || event.isTrusted !== true) return null;
+  let gesture: HomeRequest | null | undefined;
+  try {
+    gesture = consumeGesture();
+  } catch {
+    return null; // an unreadable latch is no latch
+  }
+  if (!gesture || typeof gesture.phaseBefore !== "string") return null;
+  return Object.freeze({ phaseBefore: gesture.phaseBefore });
 }
 
 // The attribute map written to the shell element. Every value is a string;

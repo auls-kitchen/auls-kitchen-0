@@ -342,9 +342,9 @@ test("L14. the lifecycle's whole reach is its three narrow ports: nothing else i
   lifecycle.dispose();
 });
 
-test("L15. the returned object exposes only start / dispose / getPhase (no input sink, no timer)", () => {
+test("L15. the returned object exposes only start / dispose / getPhase / consumeGesture (no input sink, no timer)", () => {
   const { lifecycle } = harness();
-  assert.deepEqual(Object.keys(lifecycle).sort(), ["dispose", "getPhase", "start"]);
+  assert.deepEqual(Object.keys(lifecycle).sort(), ["consumeGesture", "dispose", "getPhase", "start"]);
   assert.ok(Object.isFrozen(lifecycle));
   assert.equal("noteCustomerInput" in lifecycle, false);
 });
@@ -651,4 +651,208 @@ test("H5. end to end with the REAL monotonic clock, REAL timeouts and a REAL Eve
   lifecycle.dispose();
 
   assert.deepEqual(phases, ["ACTIVE_STANDBY", "SPACE_GIVEN", "RELEASED", "CONTEXT_EXPIRED", "HABITAT_IDLE"]);
+});
+
+// ============================================================
+// Phase-before-input (U4 Slice 2A): a PRESS latches the phase it found, once
+// ============================================================
+
+test("LG1. before any press there is nothing to consume", () => {
+  const { lifecycle } = harness();
+  assert.equal(lifecycle.consumeGesture(), null);
+});
+
+test("LG2. a press at 10s / 20s / 26s latches ACTIVE_STANDBY / SPACE_GIVEN / RELEASED (the phase BEFORE the press reset the window)", () => {
+  for (const [elapsed, expected] of [
+    [10_000, "ACTIVE_STANDBY"],
+    [20_000, "SPACE_GIVEN"],
+    [26_000, "RELEASED"],
+  ] as const) {
+    const { time, input, lifecycle } = harness();
+    input.dispatch(trusted.tap()); // customer A
+    time.advanceBy(elapsed);
+    input.dispatch(trusted.tap()); // the press under test
+    assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY", "the press has already reset the window");
+    assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: expected }, `${elapsed}ms`);
+  }
+});
+
+test("LG3. DELAYED TIMER + 30s: the 25s callback has not fired, yet the press latches RELEASED", () => {
+  const { time, input, lifecycle, phases } = harness();
+  input.dispatch(trusted.tap());
+  time.jumpBy(30_000); // nothing fires
+  assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY");
+
+  input.dispatch(trusted.tap());
+
+  assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "RELEASED" });
+  assert.deepEqual(phases, ["ACTIVE_STANDBY", "SPACE_GIVEN", "RELEASED", "ACTIVE_STANDBY"], "the missed phases are still reported, in order");
+});
+
+test("LG4. the latch is one-shot: consume once, then null", () => {
+  const { input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "HABITAT_IDLE" });
+  assert.equal(lifecycle.consumeGesture(), null);
+  assert.equal(lifecycle.consumeGesture(), null);
+});
+
+test("LG5. a DRAG never overwrites the latch (pointer drag and touch swipe), and never creates one", () => {
+  for (const makeDrag of [trusted.drag, trusted.touchSwipe]) {
+    const { time, input, lifecycle } = harness();
+    input.dispatch(trusted.tap());
+    time.jumpBy(30_000);
+    input.dispatch(trusted.tap()); // latches RELEASED
+    input.dispatch(makeDrag()); // the window is ACTIVE_STANDBY now: a drag must not replace RELEASED
+    input.dispatch(makeDrag());
+    assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "RELEASED" });
+
+    const fresh = harness();
+    fresh.input.dispatch(makeDrag());
+    assert.equal(fresh.lifecycle.consumeGesture(), null, "a drag alone is not a gesture start");
+  }
+});
+
+test("LG6. a WHEEL never overwrites the latch, and never creates one", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  time.jumpBy(30_000);
+  input.dispatch(trusted.tap());
+  input.dispatch(trusted.wheel());
+  assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "RELEASED" });
+
+  const fresh = harness();
+  fresh.input.dispatch(trusted.wheel());
+  assert.equal(fresh.lifecycle.consumeGesture(), null);
+});
+
+test("LG7. every NEW press overwrites the previous latch - and that fails safe: a later press at ACTIVE_STANDBY cannot inherit an older RELEASED", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  time.jumpBy(30_000);
+  input.dispatch(trusted.tap()); // latches RELEASED
+  input.dispatch(trusted.tap()); // a second press, now at ACTIVE_STANDBY
+  assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "ACTIVE_STANDBY" });
+
+  // ...and the reverse: the LATEST press wins, whatever it found.
+  const other = harness();
+  other.input.dispatch(trusted.tap());
+  other.time.advanceBy(5_000);
+  other.input.dispatch(trusted.tap()); // ACTIVE_STANDBY
+  other.time.jumpBy(30_000);
+  other.input.dispatch(trusted.tap()); // RELEASED
+  assert.deepEqual(other.lifecycle.consumeGesture(), { phaseBefore: "RELEASED" });
+});
+
+test("LG8. an Enter/Space press on an interactive element latches like a tap", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  time.jumpBy(30_000);
+  input.dispatch(trusted.enterOnButton());
+  assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "RELEASED" });
+});
+
+test("LG9. anything that is not a trusted press never latches: synthetic press, hover, scroll, a non-interactive key, an auto-repeat", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  lifecycle.consumeGesture(); // discard the first press, so only what follows can latch
+  time.jumpBy(30_000);
+  for (const event of [
+    synthetic.tap(),
+    synthetic.enterOnButton(),
+    trusted.hover(),
+    makeEvent("scroll"),
+    makeEvent("keydown", { key: "Enter", repeat: false, target: { tagName: "DIV" } }),
+    makeEvent("keydown", { key: "Enter", repeat: true, target: { tagName: "BUTTON" } }),
+  ]) {
+    input.dispatch(event);
+  }
+  assert.equal(lifecycle.consumeGesture(), null);
+  assert.equal(lifecycle.getPhase(), "ACTIVE_STANDBY", "and none of them reset or advanced the window");
+});
+
+test("LG10. a synthetic press does not disturb an earlier real latch", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  time.jumpBy(30_000);
+  input.dispatch(trusted.tap()); // real: latches RELEASED
+  input.dispatch(synthetic.tap());
+  assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "RELEASED" });
+});
+
+test("LG11. the latch is the phase before THAT press - later silence does not rewrite it", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap()); // from Habitat
+  time.advanceBy(26_000);
+  assert.equal(lifecycle.getPhase(), "RELEASED");
+  assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "HABITAT_IDLE" });
+});
+
+test("LG12. a late timer past 5 minutes: the press reports the expiry FIRST, latches HABITAT_IDLE, and wakes once", () => {
+  const { time, input, lifecycle, phases, wakes, calls } = harness({ ordering: true });
+  input.dispatch(trusted.tap());
+  time.jumpBy(360_000);
+  phases.length = 0;
+  const readsBefore = calls.getSnapshot;
+  const wakesBefore = wakes.length;
+
+  input.dispatch(trusted.tap());
+
+  assert.deepEqual(phases, ["SPACE_GIVEN", "RELEASED", "CONTEXT_EXPIRED", "HABITAT_IDLE", "ACTIVE_STANDBY"]);
+  assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "HABITAT_IDLE" });
+  assert.equal(wakes.length - wakesBefore, 1, "exactly one wake, after the expiry");
+  assert.equal(calls.getSnapshot - readsBefore, 1, "exactly one snapshot read for this wake");
+  assert.equal(calls.returnToWorld, 1, "Habitat entry still returns the World once");
+});
+
+test("LG13. a callback fired by the press itself never sees the PREVIOUS press latch", () => {
+  const time = createFakeTime();
+  const input = createFakeInputTarget();
+  let seenDuringDelivery: unknown = "unset";
+  const lifecycle: ReturnType<typeof createExperienceLifecycle> = createExperienceLifecycle({
+    clock: time.clock,
+    scheduler: time.scheduler,
+    inputTarget: input.target,
+    snapshots: { getSnapshot: () => IDLE_READY },
+    presentation: { returnToWorld: () => {} },
+    world: { isOrdering: () => false },
+    onPhase: (phase) => {
+      if (phase === "ACTIVE_STANDBY") seenDuringDelivery = lifecycle.consumeGesture();
+    },
+  });
+  lifecycle.start();
+
+  input.dispatch(trusted.tap()); // latches HABITAT_IDLE and is deliberately NOT consumed
+  time.jumpBy(30_000);
+  input.dispatch(trusted.tap()); // latches RELEASED, but only AFTER its own callbacks have run
+  assert.equal(seenDuringDelivery, null, "the first press's phase was not visible while this press was being delivered");
+  assert.deepEqual(lifecycle.consumeGesture(), { phaseBefore: "RELEASED" });
+});
+
+test("LG14. dispose clears the latch, and nothing latches afterwards", () => {
+  const { time, input, lifecycle } = harness();
+  input.dispatch(trusted.tap());
+  time.jumpBy(30_000);
+  input.dispatch(trusted.tap());
+  lifecycle.dispose();
+  assert.equal(lifecycle.consumeGesture(), null);
+  input.dispatch(trusted.tap());
+  assert.equal(lifecycle.consumeGesture(), null);
+});
+
+test("LG15. consuming reads no Domain snapshot, and the latch is frozen data with only a phase", () => {
+  const { input, lifecycle, calls } = harness();
+  input.dispatch(trusted.tap());
+  const readsBefore = calls.getSnapshot;
+  const gesture = lifecycle.consumeGesture();
+  assert.equal(calls.getSnapshot, readsBefore);
+  assert.ok(Object.isFrozen(gesture));
+  assert.deepEqual(Object.keys(gesture!), ["phaseBefore"]);
+});
+
+test("LG16. consumeGesture works detached from the object (no reliance on `this`)", () => {
+  const { input, lifecycle } = harness();
+  const { consumeGesture } = lifecycle;
+  input.dispatch(trusted.tap());
+  assert.deepEqual(consumeGesture(), { phaseBefore: "HABITAT_IDLE" });
 });

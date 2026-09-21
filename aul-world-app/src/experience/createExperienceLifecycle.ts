@@ -15,14 +15,24 @@
 // therefore cannot clear a cart, end a session, retry an order, hydrate,
 // rotate identity, or purge anything - at 15s, 25s, 5min, on wake, or ever.
 //
-// The returned object exposes only start / dispose / getPhase. The sink that
-// carries customer input is created here and given to the input adapter and to
-// nobody else; it is never returned.
+// Phase-before-input: a customer PRESS (a tap/click, or Enter/Space on an
+// interactive element) latches the phase the silence clock had reached, from
+// elapsed monotonic time, BEFORE that press restarted it. Only a press latches;
+// a drag or a wheel never touches the latch. Every new press overwrites it (so
+// a later press at ACTIVE_STANDBY can never inherit an older RELEASED), and
+// consumeGesture() hands it out exactly once. This is the one thing the shell's
+// Home/X activation needs to know and could not see, because by the time a
+// `click` arrives the press has already reset the window. It is data only: a
+// phase name, no Domain handle, no callback.
+//
+// The returned object exposes only start / dispose / getPhase / consumeGesture.
+// The sink that carries customer input is created here and given to the input
+// adapter and to nobody else; it is never returned.
 //
 // One instance per mount, no module-level state. Re-mounting means creating a
 // new instance after dispose(); a disposed instance cannot be started again.
 
-import type { Clock, PresentationOutPort, Scheduler, SnapshotReadPort } from "../contracts.ts";
+import type { Clock, CustomerInputKind, PresentationOutPort, Scheduler, SnapshotReadPort } from "../contracts.ts";
 import { attachCustomerInput } from "./customerInput.ts";
 import type { CustomerInputBinding, InteractiveTargetPredicate } from "./customerInput.ts";
 import type { InteractionPhase, InteractionThresholds, RestingPhase } from "./interactionContext.ts";
@@ -54,10 +64,18 @@ export interface ExperienceLifecycleOptions {
   readonly onError?: (error: unknown) => void;
 }
 
+// The phase the Experience was in before the press that started a gesture.
+export interface HomeGesture {
+  readonly phaseBefore: RestingPhase;
+}
+
 export interface ExperienceLifecycle {
   start(): void;
   dispose(): void;
   getPhase(): RestingPhase;
+  // The latched press, once: the first call after a press returns it, every
+  // later call returns null until the next press.
+  consumeGesture(): HomeGesture | null;
 }
 
 export function createExperienceLifecycle(options: ExperienceLifecycleOptions): ExperienceLifecycle {
@@ -120,13 +138,34 @@ export function createExperienceLifecycle(options: ExperienceLifecycleOptions): 
     onError: report,
   });
 
+  // The latched phase-before-input of the most recent press, or null.
+  let gesture: HomeGesture | null = null;
+
   // The only holder of customer input authority besides the timer itself.
-  const sink = Object.freeze({ noteCustomerInput: (): void => timer.noteCustomerInput() });
+  const sink = Object.freeze({
+    noteCustomerInput: (kind?: CustomerInputKind): void => {
+      // A new press replaces whatever an earlier press latched - cleared BEFORE
+      // the timer runs, so a callback fired by this very input can never read
+      // the previous press's phase.
+      if (kind === "press") gesture = null;
+      const observation = timer.noteCustomerInput(kind);
+      if (kind === "press" && observation !== null) {
+        gesture = Object.freeze({ phaseBefore: observation.phaseBefore });
+      }
+    },
+  });
+
+  function consumeGesture(): HomeGesture | null {
+    const latched = gesture;
+    gesture = null;
+    return latched;
+  }
 
   function dispose(): void {
     if (disposed) return;
     disposed = true;
     started = false;
+    gesture = null;
     inputBinding?.dispose();
     inputBinding = null;
     timer.dispose();
@@ -150,5 +189,6 @@ export function createExperienceLifecycle(options: ExperienceLifecycleOptions): 
     start,
     dispose,
     getPhase: (): RestingPhase => timer.getState().phase,
+    consumeGesture,
   });
 }

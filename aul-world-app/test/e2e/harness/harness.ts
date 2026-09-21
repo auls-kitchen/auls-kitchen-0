@@ -132,15 +132,27 @@ let currentHost: any = null;
 let lastRoot: HTMLElement | null = null;
 let phases: string[] = [];
 let wakes: Array<{ route: string; pending: string }> = [];
+let homeDecisions: string[] = [];
 let errors: string[] = [];
 let violations: string[] = [];
 let portCalls = { getSnapshot: 0, subscribe: 0, beginCustomerSession: 0, getBootstrapStatus: 0 };
 let activeDomainSubscriptions = 0;
 const timers = { pending: new Set<number>(), sets: 0, clears: 0 };
 
+// TEST-ONLY: while `hold` is on, the Experience timer's timeouts are accepted but
+// NOT scheduled - their callbacks wait until releaseHeld(). That reproduces a
+// throttled tab whose timeout is overdue, while the (fake) monotonic clock keeps
+// moving, so the e2e can prove the phase an input finds comes from elapsed time.
+const held = { on: false, nextId: -1, callbacks: new Map<number, () => void>() };
+
 const scheduler = {
   set(callback: () => void, delayMs: number): unknown {
     timers.sets += 1;
+    if (held.on) {
+      const heldId = held.nextId--;
+      held.callbacks.set(heldId, callback);
+      return heldId;
+    }
     const id = window.setTimeout(() => {
       timers.pending.delete(id);
       callback();
@@ -150,6 +162,7 @@ const scheduler = {
   },
   clear(handleId: unknown): void {
     timers.clears += 1;
+    if (held.callbacks.delete(handleId as number)) return;
     timers.pending.delete(handleId as number);
     window.clearTimeout(handleId as number);
   },
@@ -203,8 +216,11 @@ async function mount(options: { thresholds?: { spaceGivenMs: number; releasedMs:
   control.resetCounters();
   phases = [];
   wakes = [];
+  homeDecisions = [];
   errors = [];
   violations = [];
+  held.on = false;
+  held.callbacks.clear();
   portCalls = { getSnapshot: 0, subscribe: 0, beginCustomerSession: 0, getBootstrapStatus: 0 };
   activeDomainSubscriptions = 0;
 
@@ -223,6 +239,7 @@ async function mount(options: { thresholds?: { spaceGivenMs: number; releasedMs:
     thresholds: options.thresholds,
     onPhase: (phase) => phases.push(phase),
     onWake: (decision) => wakes.push({ route: decision.route, pending: decision.pending }),
+    onHomeDecision: (decision) => homeDecisions.push(decision),
     onError: (error) => errors.push(String((error as Error)?.message ?? error)),
   });
   lastRoot = container.querySelector("[data-aul-world]");
@@ -266,6 +283,19 @@ const api = {
     await handle!.domainSettled;
   },
   getPhase: (): string => (handle ? handle.getPhase() : "NOT_MOUNTED"),
+
+  // Overdue-timer simulation (see `held`). Holding starts a window in which no
+  // Experience timeout is scheduled; releasing runs whatever is still waiting.
+  holdTimers(on: boolean): void {
+    held.on = on;
+  },
+  releaseHeldTimers(): number {
+    const callbacks = [...held.callbacks.values()];
+    held.callbacks.clear();
+    held.on = false;
+    for (const callback of callbacks) callback();
+    return callbacks.length;
+  },
 
   // fake back end
   setMode(mode: CallableMode): void {
@@ -329,7 +359,7 @@ const api = {
     },
   },
 
-  events: () => ({ phases: [...phases], wakes: wakes.map((w) => ({ ...w })), errors: [...errors] }),
+  events: () => ({ phases: [...phases], wakes: wakes.map((w) => ({ ...w })), homeDecisions: [...homeDecisions], errors: [...errors] }),
   counters: () => ({
     portCalls: { ...portCalls },
     violations: [...violations],

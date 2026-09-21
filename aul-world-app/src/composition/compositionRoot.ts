@@ -42,6 +42,8 @@ import type { InteractionPhase, InteractionThresholds, RestingPhase } from "../e
 import { routeCustomerReturn } from "../experience/pendingTicket.ts";
 import type { WakeDecision } from "../experience/pendingTicket.ts";
 import { createMonotonicClock, createTimeoutScheduler } from "../experience/silenceTimer.ts";
+import { decideTakeover } from "../experience/takeoverPolicy.ts";
+import type { TakeoverDecision } from "../experience/takeoverPolicy.ts";
 import { createExperienceShell } from "../shell/experienceShell.ts";
 
 // The whole Domain surface the Composition may touch, structurally typed so
@@ -69,6 +71,10 @@ export interface MountAulWorldOptions {
   // Every route decision: once per wake from Habitat, and once more if a
   // customer who arrived before the Domain was ready is re-routed on readiness.
   readonly onWake?: (decision: WakeDecision) => void;
+  // Every takeover decision a customer's Home/X activation reaches (Slice 2A:
+  // the decision is only RECORDED here; nothing is released, cleared, or routed
+  // because of it). One of five constant names, no business data.
+  readonly onHomeDecision?: (decision: TakeoverDecision) => void;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -162,11 +168,35 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
     // is synchronous, so nothing can dispose in the middle of the wiring.
     if (disposed) return;
 
+    // The read-only Domain access the Experience is allowed.
+    const snapshots: SnapshotReadPort = { getSnapshot: () => host.orchestrator.getSnapshot() };
+
     // --- Experience shell (DOM, inside the same page as the canvas) ----------
     const shell = createExperienceShell(root, {
       domainStatus: host.getBootstrapStatus(),
       // The customer's own Menu action: the same MENU_INTENT a canvas portal tap emits.
       onMenu: () => bus.emit({ type: "MENU_INTENT", source: "dom", forceReject: false }),
+      // Home/X: the lifecycle latched the phase before the customer's press; the
+      // shell only calls this for a trusted click that has one.
+      consumeGesture: () => lifecycle?.consumeGesture() ?? null,
+      // Slice 2A decision boundary. It reads ONE snapshot, applies the pure
+      // takeover policy, and records the decision. It performs no release, no
+      // Domain write, no routing and no presentation change of its own.
+      onHome: (request) => {
+        let snapshot: ExperienceSnapshotView | null = null;
+        try {
+          snapshot = snapshots.getSnapshot();
+        } catch (error) {
+          report(error);
+          // Fail closed: an unreadable Domain is NOT_READY, never "no ticket".
+        }
+        const decision = decideTakeover({ phaseBefore: request.phaseBefore, snapshot });
+        try {
+          options.onHomeDecision?.(decision);
+        } catch (error) {
+          report(error);
+        }
+      },
     });
     cleanups.push(() => shell.dispose());
 
@@ -222,8 +252,6 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
     renderAll();
 
     // --- Experience lifecycle: the only timer, given only narrow ports -------
-    const snapshots: SnapshotReadPort = { getSnapshot: () => host.orchestrator.getSnapshot() };
-
     const experience = createExperienceLifecycle({
       clock: options.clock ?? createMonotonicClock(),
       scheduler: options.scheduler ?? createTimeoutScheduler(),

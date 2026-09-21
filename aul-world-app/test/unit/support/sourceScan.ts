@@ -38,6 +38,7 @@ const FORBIDDEN_IDENTIFIERS: readonly string[] = [
   "purge\\w*",
   "removeSubmissionAttempt",
   "removeAuthoritativeResult",
+  "releaseCustomerContext",
   "clearTerminalAttempt",
   "INACTIVITY_TIMEOUT",
   "CUSTOMER_CANCELLED",

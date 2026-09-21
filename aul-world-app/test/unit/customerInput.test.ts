@@ -10,6 +10,7 @@ import {
   CUSTOMER_INPUT_EVENT_TYPES,
   attachCustomerInput,
   classifyInputEvent,
+  classifyInputKind,
   isInteractiveElement,
 } from "../../src/experience/customerInput.ts";
 import { createFakeInputTarget, makeEvent, synthetic, trusted } from "./support/fakeInputTarget.ts";
@@ -162,13 +163,64 @@ test("I11. trusted customer events reach the sink; nothing else does", () => {
   assert.equal(calls.count, 5);
 });
 
-test("I12. the sink is only ever called with no arguments (no event data crosses the boundary)", () => {
+test("I12. the sink is only ever called with ONE argument: a kind name (no event data crosses the boundary)", () => {
   const fake = createFakeInputTarget();
   const { sink, calls } = sinkSpy();
   attachCustomerInput(fake.target, sink);
   fake.dispatch(trusted.tap());
   fake.dispatch(trusted.drag());
-  assert.deepEqual(calls.args, [[], []]);
+  assert.deepEqual(calls.args, [["press"], ["drag"]]);
+  for (const args of calls.args) {
+    assert.equal(args.length, 1);
+    assert.equal(typeof args[0], "string"); // a plain string, never the event or any of its fields
+  }
+});
+
+// ============================================================
+// Kinds (U4 Slice 2A): only a PRESS starts a gesture
+// ============================================================
+
+test("I12a. every counted input has exactly one kind: pointerdown and Enter/Space are `press`, pressed movement is `drag`, wheel is `wheel`", () => {
+  assert.equal(classifyInputKind(trusted.tap()), "press");
+  assert.equal(classifyInputKind(trusted.enterOnButton()), "press");
+  assert.equal(classifyInputKind(makeEvent("keydown", { key: " ", repeat: false, target: { tagName: "BUTTON" } })), "press");
+  assert.equal(classifyInputKind(trusted.drag()), "drag");
+  assert.equal(classifyInputKind(trusted.touchSwipe()), "drag");
+  assert.equal(classifyInputKind(trusted.wheel()), "wheel");
+});
+
+test("I12b. everything that is not customer input has NO kind: untrusted, hover, repeat, non-interactive key, other keys, unknown types", () => {
+  assert.equal(classifyInputKind(synthetic.tap()), null);
+  assert.equal(classifyInputKind(synthetic.wheel()), null);
+  assert.equal(classifyInputKind(synthetic.enterOnButton()), null);
+  assert.equal(classifyInputKind(trusted.hover()), null);
+  assert.equal(classifyInputKind(makeEvent("keydown", { key: "Enter", repeat: true, target: { tagName: "BUTTON" } })), null);
+  assert.equal(classifyInputKind(makeEvent("keydown", { key: "Enter", repeat: false, target: { tagName: "DIV" } })), null);
+  assert.equal(classifyInputKind(makeEvent("keydown", { key: "a", repeat: false, target: { tagName: "BUTTON" } })), null);
+  assert.equal(classifyInputKind(makeEvent("click")), null); // a click is never an input: it is the ACTIVATION a press led to
+  assert.equal(classifyInputKind(makeEvent("scroll")), null);
+  assert.equal(classifyInputKind(null), null);
+  assert.equal(classifyInputKind(undefined), null);
+});
+
+test("I12c. classifyInputEvent is exactly `has a kind` (the two can never disagree)", () => {
+  const events = [
+    trusted.tap(), trusted.drag(), trusted.hover(), trusted.touchSwipe(), trusted.wheel(), trusted.enterOnButton(),
+    synthetic.tap(), synthetic.wheel(), synthetic.enterOnButton(), makeEvent("click"), makeEvent("scroll"),
+  ];
+  for (const event of events) {
+    assert.equal(classifyInputEvent(event), classifyInputKind(event) !== null, event.type);
+  }
+});
+
+test("I12d. through the adapter, each event reaches the sink with its own kind, in order", () => {
+  const fake = createFakeInputTarget();
+  const { sink, calls } = sinkSpy();
+  attachCustomerInput(fake.target, sink);
+  for (const event of [trusted.tap(), trusted.drag(), trusted.wheel(), trusted.enterOnButton(), trusted.touchSwipe(), synthetic.tap(), trusted.hover()]) {
+    fake.dispatch(event);
+  }
+  assert.deepEqual(calls.args, [["press"], ["drag"], ["wheel"], ["press"], ["drag"]]);
 });
 
 test("I13. the adapter never consumes an event: no preventDefault / stopPropagation / stopImmediatePropagation", () => {

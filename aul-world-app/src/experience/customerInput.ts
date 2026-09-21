@@ -38,7 +38,7 @@
 // All listeners are bound to ONE AbortController signal; dispose() aborts it,
 // removing every listener at once. dispose() is idempotent.
 
-import type { InputSink } from "../contracts.ts";
+import type { CustomerInputKind, InputSink } from "../contracts.ts";
 
 // The structural shape of a DOM event this module reads. A real DOM Event
 // (Pointer/Touch/Wheel/Keyboard) is assignable to it; tests pass plain objects.
@@ -95,26 +95,38 @@ export function isInteractiveElement(target: unknown): boolean {
   return typeof role === "string" && INTERACTIVE_ROLES.includes(role);
 }
 
-// Pure classification: does this event count as customer input?
-export function classifyInputEvent(event: CustomerInputEventLike | null | undefined, options: CustomerInputOptions = {}): boolean {
-  if (!event || event.isTrusted !== true) return false;
+// Pure classification: what kind of customer input is this, or null when it is
+// not customer input at all.
+//   press  pointerdown, and Enter/Space on an interactive element - the start
+//          of a gesture (the only kind that can latch a phase-before-input)
+//   drag   a pressed pointer or touch moving
+//   wheel  a physical scroll wheel / trackpad
+export function classifyInputKind(event: CustomerInputEventLike | null | undefined, options: CustomerInputOptions = {}): CustomerInputKind | null {
+  if (!event || event.isTrusted !== true) return null;
 
   switch (event.type) {
     case "pointerdown":
+      return "press";
     case "touchmove":
+      return "drag";
     case "wheel":
-      return true;
+      return "wheel";
     case "pointermove":
       // Pressed only: hover is not customer input.
-      return typeof event.buttons === "number" && event.buttons > 0;
+      return typeof event.buttons === "number" && event.buttons > 0 ? "drag" : null;
     case "keydown": {
-      if (event.repeat === true) return false;
-      if (typeof event.key !== "string" || !ACTIVATION_KEYS.includes(event.key)) return false;
-      return (options.isInteractiveTarget ?? isInteractiveElement)(event.target);
+      if (event.repeat === true) return null;
+      if (typeof event.key !== "string" || !ACTIVATION_KEYS.includes(event.key)) return null;
+      return (options.isInteractiveTarget ?? isInteractiveElement)(event.target) ? "press" : null;
     }
     default:
-      return false;
+      return null;
   }
+}
+
+// Pure classification: does this event count as customer input?
+export function classifyInputEvent(event: CustomerInputEventLike | null | undefined, options: CustomerInputOptions = {}): boolean {
+  return classifyInputKind(event, options) !== null;
 }
 
 export function attachCustomerInput(target: EventTarget, sink: InputSink, options: CustomerInputOptions = {}): CustomerInputBinding {
@@ -124,7 +136,8 @@ export function attachCustomerInput(target: EventTarget, sink: InputSink, option
   const handler = (event: Event): void => {
     // Guards a listener that a non-conforming target failed to remove.
     if (signal.aborted) return;
-    if (classifyInputEvent(event, options)) sink.noteCustomerInput();
+    const kind = classifyInputKind(event, options);
+    if (kind !== null) sink.noteCustomerInput(kind);
   };
 
   try {

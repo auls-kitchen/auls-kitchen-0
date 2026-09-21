@@ -33,6 +33,7 @@ const OPTIONAL_SCANNED = [
   "experience/customerInput.ts",
   "experience/habitatPresentation.ts",
   "experience/createExperienceLifecycle.ts",
+  "experience/takeoverPolicy.ts", // U4 Slice 2A
 ];
 
 function scan(relativePath: string) {
@@ -96,6 +97,7 @@ test("C4. negative control: each forbidden Domain capability is detected in code
     "signOut",
     "purgeCustomerContext",
     "removeSubmissionAttempt",
+    "releaseCustomerContext", // U4 Slice 1's guarded release: never reachable from the timer, lifecycle, policy or shell
     "INACTIVITY_TIMEOUT",
     "CUSTOMER_CANCELLED",
     "stopInteraction",
@@ -193,6 +195,8 @@ const EXPECTED_IMPORTS: Record<string, string[]> = {
     "./pendingTicket.ts",
     "./silenceTimer.ts",
   ],
+  // U4 Slice 2A: a pure decision over a snapshot the caller already read.
+  "experience/takeoverPolicy.ts": ["../contracts.ts", "./interactionContext.ts", "./pendingTicket.ts"],
 };
 
 function codeOf(relativePath: string): string {
@@ -254,4 +258,45 @@ test("C13. negative control: the import-graph and authority checks detect a viol
   // A clock read of performance in another file would break C12.
   assert.ok(/\bperformance\b/.test(stripComments("const t = performance.now();")));
   assert.ok(!/\bperformance\b/.test(stripComments("// performance is read elsewhere")));
+});
+
+// ============================================================
+// U4 Slice 2A: the phase-before-input latch and the release capability
+// ============================================================
+
+function namedIn(pattern: RegExp): string[] {
+  const holders: string[] = [];
+  const walk = (dir: string) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (pattern.test(stripComments(fs.readFileSync(full, "utf8")))) {
+        holders.push(path.relative(SRC_ROOT, full).split(path.sep).join("/"));
+      }
+    }
+  };
+  walk(SRC_ROOT);
+  return holders.sort();
+}
+
+test("C14. consumeGesture (the latched phase-before-input) is named only where it is defined and where it is handed to the shell and the Composition", () => {
+  assert.deepEqual(namedIn(/\bconsumeGesture\b/), [
+    "composition/compositionRoot.ts",
+    "experience/createExperienceLifecycle.ts",
+    "shell/experienceShell.ts",
+    "shell/shellModel.ts",
+  ]);
+});
+
+test("C15. Slice 2A: no source file names releaseCustomerContext at all - X/Home records a decision and performs no release", () => {
+  assert.deepEqual(namedIn(/\breleaseCustomerContext\b/), []);
+});
+
+test("C16. Slice 2A: the phase latch is written only inside the lifecycle, and only a `press` kind reaches it", () => {
+  const code = codeOf("experience/createExperienceLifecycle.ts");
+  // Every assignment to the latch is guarded by the press kind, or is the one-shot clear / dispose clear.
+  const assignments = [...code.matchAll(/\bgesture\s*=\s*([^;]+);/g)].map((m) => m[1]!.trim());
+  assert.deepEqual(assignments.sort(), ["Object.freeze({ phaseBefore: observation.phaseBefore })", "null", "null", "null"].sort());
+  assert.match(code, /if \(kind === "press"\) gesture = null;/);
+  assert.match(code, /if \(kind === "press" && observation !== null\)/);
 });

@@ -179,9 +179,11 @@ test("U2. the shell offers no Domain action at all: nothing can reset, clear, re
   });
   expect(await attribute(page, "data-view")).toBe("ownership");
 
-  // The only control in the shell is the Menu button, and it only asks AWR for its menu.
-  expect(await page.locator("[data-experience-shell] button").count()).toBe(1);
-  expect(await page.locator("[data-experience-shell] button").getAttribute("data-shell-action")).toBe("menu");
+  // The shell has exactly two controls: Menu (asks AWR for its menu) and Home/X
+  // (a customer-intent control that only reports the phase before the press).
+  const buttons = page.locator("[data-experience-shell] button");
+  expect(await buttons.count()).toBe(2);
+  expect(await buttons.evaluateAll((elements) => elements.map((e) => e.getAttribute("data-shell-action")))).toEqual(["menu", "home"]);
   const text = (await page.locator("[data-experience-shell]").innerText()).toLowerCase();
   for (const word of ["bukan", "reset", "clear", "hapus", "batal", "cancel", "retry", "coba lagi"]) {
     expect(text).not.toContain(word);
@@ -190,6 +192,7 @@ test("U2. the shell offers no Domain action at all: nothing can reset, clear, re
   // Using every control the shell has, and every input, changes nothing in the Domain.
   const before = await domain(page);
   await page.locator("[data-shell-action=menu]").click({ force: true });
+  await page.locator("[data-shell-action=home]").click({ force: true }); // an UNKNOWN is never taken over
   await tapWorld(page, AWR.aul);
   await tapWorld(page, AWR.menuPortal);
   await advance(page, 300_000);
