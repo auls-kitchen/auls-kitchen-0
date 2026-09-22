@@ -186,7 +186,7 @@ test("CB8. the shell's only interactive controls are Menu (asks AWR for its menu
   assert.deepEqual([...request.matchAll(/readonly (\w+):/g)].map((m) => m[1]), ["phaseBefore"]);
 });
 
-test("CB12. Slice 2A: the Composition's Home boundary reads one snapshot, applies the pure policy, and records the decision - nothing else", () => {
+test("CB12. S4c: the Home boundary reads one snapshot, applies the pure policy, records the decision, and now ACTS on it through the same shared machinery every other release path already uses", () => {
   const code = stripComments(read(COMPOSITION));
   const start = code.indexOf("onHome: (request) => {");
   const end = code.indexOf("cleanups.push(() => shell.dispose())");
@@ -194,17 +194,57 @@ test("CB12. Slice 2A: the Composition's Home boundary reads one snapshot, applie
   const boundary = code.slice(start, end);
 
   assert.equal([...code.matchAll(/\bdecideTakeover\s*\(/g)].length, 1, "one call site for the policy");
-  for (const required of ["snapshots.getSnapshot()", "decideTakeover(", "options.onHomeDecision?.(decision)"]) {
+  for (const required of [
+    "snapshots.getSnapshot()",
+    "decideTakeover(",
+    "options.onHomeDecision?.(decision)",
+    "reconcileContext(",
+    "presentImmediate(routeCustomerReturn(snapshot));",
+  ]) {
     assert.ok(boundary.includes(required), `the boundary must contain ${required}`);
   }
-  // No Domain, no AWR bus, no shell, no routing, no world change from a Home activation.
-  for (const forbidden of ["host", "bus", "shell.", "setWake", "setPhase", "routeCustomerReturn", "returnToWorld", "MENU_INTENT", "RETURN_TO_WORLD", "RESET_WORLD"]) {
-    assert.equal(boundary.includes(forbidden), false, `the Home boundary must not touch ${forbidden}`);
+  assert.equal([...boundary.matchAll(/getSnapshot\s*\(/g)].length, 1, "still exactly one snapshot read");
+  assert.equal([...boundary.matchAll(/\breconcileContext\s*\(/g)].length, 1, "exactly one reconciliation call site");
+  assert.match(boundary, /reconcileContext\(routeCustomerReturn\(snapshot\), snapshot, "TAKEOVER", \(plan\) => plan === "RELEASE"\);/);
+  // No raw Domain/AWR/shell/release primitive INLINE here - everything goes through the shared
+  // presentImmediate/reconcileContext machinery (defined once, elsewhere), never duplicated.
+  for (const forbidden of [
+    "host",
+    "bus.",
+    "shell.",
+    "setWake",
+    "setPhase",
+    "returnToWorld",
+    "MENU_INTENT",
+    "RETURN_TO_WORLD",
+    "RESET_WORLD",
+    "releaseCustomerContext",
+    "transitions.",
+    "releasePlanFor",
+    "afterSettle",
+    "boundary.own",
+    "boundary.beginEpoch",
+  ]) {
+    assert.equal(boundary.includes(forbidden), false, `the Home boundary must not touch ${forbidden} directly - only through reconcileContext/presentImmediate`);
   }
-  // S3 wired a release for the 5-minute expiry only: Home/X stays release-free (takeover is a later slice).
-  for (const forbidden of ["releaseCustomerContext", "transitions", "releasePlanFor"]) {
-    assert.equal(boundary.includes(forbidden), false, `the Home boundary must not touch ${forbidden}`);
+});
+
+test("CB22. S4c: BLOCKED_UNKNOWN is isolated from the takeover branch - it can never reach reconcileContext, so it can never begin a new epoch or touch the Domain", () => {
+  const code = compositionCode();
+  const start = code.indexOf('if (decision === "BLOCKED_UNKNOWN") {');
+  const mid = code.indexOf('} else if (decision === "TAKEOVER_ACTIVE_CART"');
+  const end = code.indexOf("},", mid);
+  assert.ok(start > 0 && mid > start && end > mid, "both decision branches must be found, in that order");
+  const blockedBranch = code.slice(start, mid);
+  const takeoverBranch = code.slice(mid, end);
+  for (const forbidden of ["reconcileContext", "beginEpoch", "transitions.release", "resetWorld"]) {
+    assert.equal(blockedBranch.includes(forbidden), false, `BLOCKED_UNKNOWN must never reach ${forbidden}`);
   }
+  assert.match(blockedBranch, /presentImmediate\(routeCustomerReturn\(snapshot\)\);/);
+  assert.match(takeoverBranch, /reconcileContext\(/);
+  assert.match(takeoverBranch, /decision === "TAKEOVER_ACTIVE_CART" \|\| decision === "TAKEOVER_CONFIRMATION"/);
+  // NOT_READY and NO_TAKEOVER fall through neither branch: no third arm exists.
+  assert.equal([...code.matchAll(/\} else if \(decision ===/g)].length, 1, "exactly one else-if: no third decision branch");
 });
 
 // ============================================================
@@ -259,7 +299,7 @@ test("CB16. S3: the lifecycle gets the handler; the coordinator is created befor
   assert.equal([...code.matchAll(/\bonContextExpired\s*:/g)].length, 1);
 });
 
-test("CB17. S4b: RESET_WORLD/RETURN_TO_WORLD are emitted from ONE function, in that order, gated by FRESH + worldQuiet, and nothing of takeover/S4c has entered the Composition", () => {
+test("CB17. S4b/S4c: RESET_WORLD/RETURN_TO_WORLD are emitted from ONE function, in that order, gated by FRESH + worldQuiet - and takeover reuses that SAME function, adding no second reset path", () => {
   const code = compositionCode();
   const emitted = [...new Set([...code.matchAll(/bus\.emit\(\s*\{\s*type:\s*"(\w+)"/g)].map((m) => m[1]))].sort();
   assert.deepEqual(emitted, ["DOM_PANEL_ACTION", "MENU_INTENT", "RETURN_TO_WORLD", "TICK"]);
@@ -286,9 +326,12 @@ test("CB17. S4b: RESET_WORLD/RETURN_TO_WORLD are emitted from ONE function, in t
   // it is never read by own()/isCurrent(), so it can never authorize anything.
   assert.match(code, /boundary\.noteWorldTouch\(\)/);
   assert.equal([...code.matchAll(/\bboundary\s*\.\s*noteWorldTouch\s*\(\s*\)/g)].length, 1, "noted from exactly one place: the bus subscriber");
-  for (const forbidden of ["OWNERSHIP_CONFIRMATION", "data-pending", "hasPendingTicket", '"TAKEOVER"']) {
+  for (const forbidden of ["OWNERSHIP_CONFIRMATION", "data-pending", "hasPendingTicket"]) {
     assert.equal(code.includes(forbidden), false, `the composition must not contain ${forbidden}`);
   }
+  // "TAKEOVER" is now legitimate (S4c) - exactly one call site, reusing resetWorld, never a
+  // second reset function or a second RESET_WORLD/RETURN_TO_WORLD pair of its own.
+  assert.equal([...code.matchAll(/"TAKEOVER"/g)].length, 1, "the takeover cause is named exactly once");
 });
 
 test("CB18. S4b: touch is never presentation/release authority - neither the eligibility predicates NOR reconcileContext's own eligibility guards ever consult worldQuiet", () => {

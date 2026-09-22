@@ -205,6 +205,17 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
         } catch (error) {
           report(error);
         }
+        // S4c: acting on the decision - NOT_READY and NO_TAKEOVER stay a pure no-op (nothing
+        // releasable, nothing protected to show differently). BLOCKED_UNKNOWN presents the
+        // neutral protected view WITHOUT ever beginning a new epoch or touching the Domain
+        // (locked): it bypasses reconcileContext entirely, unlike every releasing path. Only
+        // an ACCEPTED takeover reconciles for real, through the exact same machinery a wake
+        // already uses - same epoch guard, same single-flight coordinator, same gated reset.
+        if (decision === "BLOCKED_UNKNOWN") {
+          presentImmediate(routeCustomerReturn(snapshot));
+        } else if (decision === "TAKEOVER_ACTIVE_CART" || decision === "TAKEOVER_CONFIRMATION") {
+          reconcileContext(routeCustomerReturn(snapshot), snapshot, "TAKEOVER", (plan) => plan === "RELEASE");
+        }
       },
     });
     cleanups.push(() => shell.dispose());

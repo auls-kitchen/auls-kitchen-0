@@ -353,19 +353,24 @@ test("EX16. once the release has COMPLETED, the returning customer finds an idle
 // Nothing else changed: the release seam is used by the expiry and by nothing else
 // ============================================================
 
-test("EX14. no other path releases: taps, the Menu button, Home/X, and 15s / 25s of silence make ZERO release calls", async ({ page }) => {
+test("EX14. taps, the Menu button, and silence that never reaches an ACCEPTED takeover make ZERO release calls - only the expiry, or an ACCEPTED takeover (U4 S4c; see home.spec.ts X2), ever release", async ({ page }) => {
   await arrive(page, withCart(page));
   await tapWorld(page, AWR.aul);
   await tapWorld(page, AWR.menuPortal);
   await page.locator("[data-shell-action=menu]").click({ force: true });
   await advance(page, 15_000);
-  await page.locator("[data-shell-action=home]").click({ force: true });
-  await advance(page, 26_000); // RELEASED: a takeover is DECIDED (S2A) but nothing is executed
-  await page.locator("[data-shell-action=home]").click({ force: true });
+  await page.locator("[data-shell-action=home]").click({ force: true }); // SPACE_GIVEN before this press: NO_TAKEOVER
 
   expect(await releaseCalls(page)).toBe(0);
   expect(await domain(page)).toMatchObject({ session: "active", cartLines: 1 });
+  expect((await events(page)).homeDecisions.at(-1)).toBe("NO_TAKEOVER");
+
+  // U4 S4c: only from HERE, once silence reaches RELEASED, does an ACCEPTED takeover release for real.
+  await advance(page, 26_000);
+  await page.locator("[data-shell-action=home]").click({ force: true });
   expect((await events(page)).homeDecisions.at(-1)).toBe("TAKEOVER_ACTIVE_CART");
+  expect(await releaseCalls(page)).toBe(1);
+  await expect.poll(() => domain(page)).toMatchObject({ session: "idle", cartLines: 0 });
 });
 
 test("EX15. nothing of the next slice entered: the expiry alone still shows the old behaviour - view habitat, no world reset (the camera stays where the customer left it)", async ({ page }) => {
