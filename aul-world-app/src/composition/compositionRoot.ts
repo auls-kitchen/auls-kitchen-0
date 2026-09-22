@@ -343,6 +343,24 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
       if (verdict === "FRESH" && boundary.worldQuiet(token)) resetWorld();
     }
 
+    // Runs a caller-supplied continuation exactly when a release this
+    // Composition owns has settled FRESH - independent of worldQuiet (a
+    // customer's touch may still veto the optional World reset without ever
+    // vetoing this). Only ever called from inside boundary.own()'s registered
+    // continuation, itself only invoked by settle() while the token is
+    // current, so no staleness check is needed here; it is already
+    // guaranteed, and settle() invokes that continuation at most once - so
+    // this runs at most once too. The callback is external (a future D2
+    // caller's), so it is isolated the same way onWake/onHomeDecision already are.
+    function runFresh(verdict: ReleaseVerdict, onFresh: (() => void) | undefined): void {
+      if (verdict !== "FRESH" || !onFresh) return;
+      try {
+        onFresh();
+      } catch (error) {
+        report(error);
+      }
+    }
+
     // The one reconciliation entry point shared by a wake and the reboot boundary
     // (S4b). `eligible` decides which release plans this caller may reconcile
     // (a wake reconciles any releasable context; the reboot boundary reconciles
@@ -350,11 +368,20 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
     // release, never consumes another owner's verdict, never retries: if
     // own() fails (the epoch already has an owner), it fails closed to an
     // immediate, verdict-less presentation.
+    //
+    // `onFresh` is an optional, additive continuation (D2 Step 1): when given,
+    // it runs once a release THIS reconciliation itself owns has settled FRESH
+    // for the still-current token - never on UNAVAILABLE, never on a stale or
+    // contested-away token, and never tied to worldQuiet/resetWorld. It rides
+    // the exact same own()/settle() closure presentFinal already uses, so it
+    // inherits the same at-most-once, current-token-only guarantee. No caller
+    // today passes it; existing callers are unaffected.
     function reconcileContext(
       decision: WakeDecision,
       snapshot: ExperienceSnapshotView | null,
       cause: ReleaseCause,
       eligible: (plan: ReleasePlan, snapshot: ExperienceSnapshotView | null) => boolean,
+      onFresh?: () => void,
     ): void {
       const token = boundary.beginEpoch();
       currentToken = token;
@@ -364,7 +391,10 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
         return;
       }
       if (!transitions.isSettling()) {
-        if (boundary.own(token, (verdict) => presentFinal(token, snapshot, verdict))) {
+        if (boundary.own(token, (verdict) => {
+          presentFinal(token, snapshot, verdict);
+          runFresh(verdict, onFresh);
+        })) {
           void transitions.release(cause);
         } else {
           presentImmediate(decision);
@@ -388,7 +418,10 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
           presentImmediate(freshDecision);
           return;
         }
-        if (boundary.own(token, (verdict) => presentFinal(token, freshSnapshot, verdict))) {
+        if (boundary.own(token, (verdict) => {
+          presentFinal(token, freshSnapshot, verdict);
+          runFresh(verdict, onFresh);
+        })) {
           void transitions.release(cause);
         } else {
           presentImmediate(freshDecision);

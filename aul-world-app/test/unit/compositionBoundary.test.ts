@@ -391,6 +391,88 @@ test("CB21. S4b: the reboot boundary's eligibility is CONFIRMATION only - never 
 });
 
 // ============================================================
+// D2 Step 1: reconcileContext's additive, optional `onFresh` continuation
+// ============================================================
+//
+// No caller passes onFresh in this step (D2 Menu/Product wiring is NOT part of
+// it), so there is no DOM/e2e path that exercises it yet. Its correctness is
+// proven here in two parts that compose into the full guarantee:
+//   1. structurally, that runFresh(verdict, onFresh) is reachable ONLY from
+//      inside the exact same boundary.own(token, ...) closure presentFinal
+//      already uses - so it inherits, for free, the at-most-once/current-
+//      token-only delivery contract contextBoundary.test.ts already proves
+//      exhaustively (CBD5-CBD10, CBD16) for that frozen, unmodified primitive;
+//   2. behaviorally, by extracting runFresh's real body from the shipped file
+//      and executing it for real, proving its OWN gating (FRESH-only, at most
+//      one call, errors isolated) - the one piece contextBoundary.test.ts
+//      cannot cover, since runFresh lives in compositionRoot.ts, not in the
+//      frozen primitive.
+
+test("CB23. D2 Step 1: reconcileContext gained onFresh as a 5th, OPTIONAL parameter; the three existing callers still pass exactly their original four arguments", () => {
+  const code = compositionCode();
+  assert.match(code, /function reconcileContext\(\s*decision: WakeDecision,\s*snapshot: ExperienceSnapshotView \| null,\s*cause: ReleaseCause,\s*eligible: \(plan: ReleasePlan, snapshot: ExperienceSnapshotView \| null\) => boolean,\s*onFresh\?: \(\) => void,\s*\): void \{/);
+  // Each existing call site, verbatim, ending in `);` right after its eligible closure -
+  // if a 5th argument had been added to any of them, none of these would still match.
+  for (const call of [
+    'reconcileContext(decision, snapshot, "WAKE_RECONCILE", (plan) => plan === "RELEASE");',
+    'reconcileContext(routeCustomerReturn(snapshot), snapshot, "REBOOT_BOUNDARY", (plan, s) => plan === "RELEASE" && classifyPending(s) === "CONFIRMATION");',
+    'reconcileContext(routeCustomerReturn(snapshot), snapshot, "TAKEOVER", (plan) => plan === "RELEASE");',
+  ]) {
+    assert.ok(code.includes(call), `existing call site must be unchanged: ${call}`);
+  }
+  assert.equal([...code.matchAll(/\breconcileContext\s*\(/g)].length, 4, "the definition's own reference aside, exactly three call sites");
+});
+
+test("CB24. D2 Step 1: runFresh is reachable ONLY from inside the two boundary.own(token, ...) closures presentFinal already uses, immediately after presentFinal, never inside a presentImmediate branch, and never consults worldQuiet", () => {
+  const code = compositionCode();
+  const runFreshCalls = [...code.matchAll(/\brunFresh\s*\(/g)];
+  // One definition, two call sites - never referenced from presentImmediate's own branches.
+  assert.equal([...code.matchAll(/\bfunction runFresh\s*\(/g)].length, 1);
+  assert.equal(runFreshCalls.length, 3, "the definition's own name plus exactly two call sites");
+  const ownSites = [...code.matchAll(/boundary\.own\(token, \(verdict\) => \{\s*presentFinal\([^)]*\);\s*runFresh\(verdict, onFresh\);\s*\}\)/g)];
+  assert.equal(ownSites.length, 2, "both own() closures call presentFinal, then runFresh(verdict, onFresh), in that order - fast path and contested path");
+  const fnStart = code.indexOf("function runFresh(");
+  const fnEnd = code.indexOf("\n    }\n", fnStart);
+  const runFreshBody = code.slice(fnStart, fnEnd);
+  assert.equal(runFreshBody.includes("worldQuiet"), false, "runFresh must never consult worldQuiet - a touch may veto the reset without ever vetoing this");
+  assert.equal(runFreshBody.includes("resetWorld"), false, "runFresh must never itself trigger the World reset - that stays presentFinal's job alone");
+});
+
+test("CB25. D2 Step 1 (behavioral): runFresh's real, shipped body - executed directly - runs the callback exactly once for FRESH, never for any other verdict, tolerates a missing callback, and isolates a throwing one", () => {
+  const code = compositionCode();
+  const fnStart = code.indexOf("function runFresh(");
+  const braceStart = code.indexOf("{", fnStart);
+  const fnEnd = code.indexOf("\n    }\n", fnStart);
+  const body = code.slice(braceStart + 1, fnEnd);
+  const runFresh = new Function("verdict", "onFresh", "report", body) as (verdict: string, onFresh: (() => void) | undefined, report: (error: unknown) => void) => void;
+
+  let calls = 0;
+  runFresh("FRESH", () => { calls += 1; }, () => assert.fail("report must not be called on success"));
+  assert.equal(calls, 1, "FRESH with a callback runs it exactly once");
+
+  calls = 0;
+  runFresh("UNAVAILABLE", () => { calls += 1; }, () => assert.fail("report must not be called"));
+  assert.equal(calls, 0, "a non-FRESH verdict never runs the callback");
+
+  calls = 0;
+  assert.doesNotThrow(() => runFresh("FRESH", undefined, () => assert.fail("report must not be called")));
+  assert.equal(calls, 0, "no callback supplied is a silent no-op, exactly like every other optional hook here");
+
+  const reported: unknown[] = [];
+  assert.doesNotThrow(() =>
+    runFresh(
+      "FRESH",
+      () => {
+        throw new Error("boom");
+      },
+      (error) => reported.push(error),
+    ),
+  );
+  assert.equal(reported.length, 1);
+  assert.match(String((reported[0] as Error).message), /boom/, "a throwing continuation is caught and reported, never left to propagate");
+});
+
+// ============================================================
 // Negative controls: the rules above actually detect violations
 // ============================================================
 
