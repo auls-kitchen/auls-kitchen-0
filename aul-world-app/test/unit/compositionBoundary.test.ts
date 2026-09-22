@@ -193,7 +193,9 @@ test("CB12. S4c: the Home boundary reads one snapshot, applies the pure policy, 
   assert.ok(start > 0 && end > start, "the onHome boundary must be found");
   const boundary = code.slice(start, end);
 
-  assert.equal([...code.matchAll(/\bdecideTakeover\s*\(/g)].length, 1, "one call site for the policy");
+  // D2 Step 2 added a second call site (the Menu/Product gate, handleMenuInteraction) -
+  // both are checked here; the Home boundary's OWN call site is verified below via `boundary`.
+  assert.equal([...code.matchAll(/\bdecideTakeover\s*\(/g)].length, 2, "two call sites for the policy: Home, and the D2 Step 2 Menu/Product gate");
   for (const required of [
     "snapshots.getSnapshot()",
     "decideTakeover(",
@@ -329,9 +331,10 @@ test("CB17. S4b/S4c: RESET_WORLD/RETURN_TO_WORLD are emitted from ONE function, 
   for (const forbidden of ["OWNERSHIP_CONFIRMATION", "data-pending", "hasPendingTicket"]) {
     assert.equal(code.includes(forbidden), false, `the composition must not contain ${forbidden}`);
   }
-  // "TAKEOVER" is now legitimate (S4c) - exactly one call site, reusing resetWorld, never a
-  // second reset function or a second RESET_WORLD/RETURN_TO_WORLD pair of its own.
-  assert.equal([...code.matchAll(/"TAKEOVER"/g)].length, 1, "the takeover cause is named exactly once");
+  // "TAKEOVER" is now legitimate (S4c), and reused as-is by D2 Step 2's Menu/Product gate -
+  // two call sites (Home, and handleMenuInteraction), both reusing the SAME resetWorld,
+  // never a second reset function or a second RESET_WORLD/RETURN_TO_WORLD pair of their own.
+  assert.equal([...code.matchAll(/"TAKEOVER"/g)].length, 2, "the takeover cause is reused, never renamed, by both callers");
 });
 
 test("CB18. S4b: touch is never presentation/release authority - neither the eligibility predicates NOR reconcileContext's own eligibility guards ever consult worldQuiet", () => {
@@ -420,7 +423,9 @@ test("CB23. D2 Step 1: reconcileContext gained onFresh as a 5th, OPTIONAL parame
   ]) {
     assert.ok(code.includes(call), `existing call site must be unchanged: ${call}`);
   }
-  assert.equal([...code.matchAll(/\breconcileContext\s*\(/g)].length, 4, "the definition's own reference aside, exactly three call sites");
+  // D2 Step 2 added a fourth call site (handleMenuInteraction's own takeover branch,
+  // tested separately in CB26) - the definition's own reference aside, exactly four now.
+  assert.equal([...code.matchAll(/\breconcileContext\s*\(/g)].length, 5, "the definition's own reference aside, exactly four call sites");
 });
 
 test("CB24. D2 Step 1: runFresh is reachable ONLY from inside the two boundary.own(token, ...) closures presentFinal already uses, immediately after presentFinal, never inside a presentImmediate branch, and never consults worldQuiet", () => {
@@ -470,6 +475,249 @@ test("CB25. D2 Step 1 (behavioral): runFresh's real, shipped body - executed dir
   );
   assert.equal(reported.length, 1);
   assert.match(String((reported[0] as Error).message), /boom/, "a throwing continuation is caught and reported, never left to propagate");
+});
+
+// ============================================================
+// D2 Step 2: the Menu/Product first-press takeover gate
+// ============================================================
+
+test("CB26. D2 Step 2: handleMenuInteraction is the ONE Menu/Product gate - defined once, and both the shell Menu button and the canvas Portal path call it; no second Menu business path exists", () => {
+  const code = compositionCode();
+  assert.equal([...code.matchAll(/\bfunction handleMenuInteraction\s*\(/g)].length, 1, "exactly one definition");
+  // The definition's own reference, plus exactly two call sites: onMenu, and the canvas gate.
+  assert.equal([...code.matchAll(/\bhandleMenuInteraction\s*\(/g)].length, 3, "one definition, two call sites");
+  assert.match(code, /onMenu: \(\) => handleMenuInteraction\(\(\) => bus\.emit\(\{ type: "MENU_INTENT", source: "dom", forceReject: false \}\)\),/);
+  assert.match(code, /handleMenuInteraction\(\(\) => handleObjectHit\(state, objectId, source, bus\)\);/);
+  // The original bus.emit(MENU_INTENT) line, and the original handleObjectHit(...) call, each
+  // still exist in EXACTLY their pre-existing textual shape - moved into closures, never
+  // rewritten, never duplicated into a second Menu/Product action of their own.
+  assert.equal([...code.matchAll(/bus\.emit\(\{ type: "MENU_INTENT", source: "dom", forceReject: false \}\)/g)].length, 1, "exactly one literal MENU_INTENT emit");
+  assert.equal([...code.matchAll(/handleObjectHit\(state, objectId, source, bus\)/g)].length, 2, "the gated call and the unconditional fallback - both the exact same call");
+});
+
+test("CB27. D2 Step 2: handleMenuInteraction's own body - gesture, snapshot, decision, and exactly one reconcileContext call site forwarding `action` as onFresh - matches the locked contract, and touches no raw Domain/AWR/shell/release primitive directly", () => {
+  const code = compositionCode();
+  const start = code.indexOf("function handleMenuInteraction(action: () => void): void {");
+  const end = code.indexOf("\n    }\n", start);
+  assert.ok(start > 0 && end > start, "handleMenuInteraction must be found");
+  const body = code.slice(start, end);
+
+  const gesture = body.indexOf("lifecycle?.consumeGesture() ?? null");
+  const snap = body.indexOf("snapshots.getSnapshot()");
+  const decide = body.indexOf("decideTakeover(");
+  const reconcile = body.indexOf("reconcileContext(");
+  assert.ok(gesture > 0 && snap > gesture && decide > snap && reconcile > decide, "gesture, then snapshot, then decision, then reconciliation - in that order");
+
+  assert.equal([...body.matchAll(/getSnapshot\s*\(/g)].length, 1, "exactly one snapshot read");
+  assert.equal([...body.matchAll(/\bdecideTakeover\s*\(/g)].length, 1, "exactly one policy call");
+  assert.equal([...body.matchAll(/\breconcileContext\s*\(/g)].length, 1, "exactly one reconciliation call site");
+  assert.match(body, /presentImmediate\(routeCustomerReturn\(snapshot\)\);/);
+  assert.match(body, /reconcileContext\(routeCustomerReturn\(snapshot\), snapshot, "TAKEOVER", \(plan\) => plan === "RELEASE", action\);/);
+  assert.match(body, /decision === "BLOCKED_UNKNOWN" \|\| decision === "NOT_READY"/, "NOT_READY is actively presented here, unlike Home's own no-op");
+
+  // Generic over `action`: the gate itself never names what it defers - no AWR/shell/release
+  // primitive appears directly, only through the same shared presentImmediate/reconcileContext
+  // machinery every other release path already uses.
+  for (const forbidden of [
+    "host",
+    "bus.",
+    "shell.",
+    "setWake",
+    "setPhase",
+    "MENU_INTENT",
+    "handleObjectHit",
+    "RETURN_TO_WORLD",
+    "RESET_WORLD",
+    "releaseCustomerContext",
+    "transitions.",
+    "releasePlanFor",
+    "afterSettle",
+    "boundary.own",
+    "boundary.beginEpoch",
+    "intentFor",
+  ]) {
+    assert.equal(body.includes(forbidden), false, `handleMenuInteraction must not touch ${forbidden} directly - only through action()/reconcileContext/presentImmediate`);
+  }
+});
+
+test("CB28. D2 Step 2 (Owner-corrected scope): the canvas gate classifies Portal ONLY by reading obj.class off state.objects - never AWR's intentFor, never a new AWR import - and Character/Reactive/Decorative/Event ALL fall through to the exact, unmodified handleObjectHit unconditionally", () => {
+  const code = compositionCode();
+  assert.equal(code.includes("interactionContract"), false, "intentFor/interactionContract must never be named or imported here");
+  assert.equal(code.includes("intentFor"), false);
+
+  // The allow-list itself stays exactly as it was before D2 Step 2 - no new AWR dependency.
+  assert.equal(ALLOWED_AWR_IMPORTS.includes("world/interactionContract.ts"), false, "the allow-list must not have been extended for this");
+  const specifiers = [...new Set(importSpecifiers(stripComments(read(COMPOSITION))))];
+  const awrImports = specifiers.filter((s) => s.includes("aul-world-runtime/src/")).map((s) => s.replace(/^.*aul-world-runtime\/src\//, ""));
+  assert.equal(awrImports.includes("world/interactionContract.ts"), false, "compositionRoot.ts must not import interactionContract.ts");
+
+  const start = code.indexOf("renderer.onObjectPointerDown((objectId, source) => {");
+  const end = code.indexOf("});", start) + "});".length;
+  assert.ok(start > 0 && end > start, "the canvas gate must be found");
+  const gate = code.slice(start, end);
+
+  assert.match(gate, /const obj = state\.objects\.find\(\(candidate\) => candidate\.id === objectId\);/);
+  // ONLY Portal is named as an included class - Character and Reactive are deliberately
+  // excluded (Owner correction), never routed through decideTakeover/getSnapshot/reconcileContext.
+  assert.match(gate, /if \(obj !== undefined && obj\.class === "Portal"\) \{\s*handleMenuInteraction\(\(\) => handleObjectHit\(state, objectId, source, bus\)\);\s*return;\s*\}/);
+  for (const excluded of ["Character", "Reactive", "Decorative", "Event"]) {
+    assert.equal(gate.includes(`"${excluded}"`), false, `${excluded} must never be named as an included class in the canvas gate`);
+  }
+  // The unconditional fallback for anything else (Character/Reactive/Decorative/Event, or an
+  // unknown id) is the exact, unmodified call - never re-derived, never skipped, never gated.
+  assert.match(gate, /\}\s*handleObjectHit\(state, objectId, source, bus\);\s*\}\);/);
+});
+
+test("CB30. D2 Step 2 (Owner-corrected scope): a Character/Reactive hit never reaches handleMenuInteraction, snapshots.getSnapshot, decideTakeover, or reconcileContext for D2 purposes - it is textually indistinguishable from the pre-D2 unconditional call", () => {
+  const code = compositionCode();
+  const start = code.indexOf("renderer.onObjectPointerDown((objectId, source) => {");
+  const end = code.indexOf("});", start) + "});".length;
+  const gate = code.slice(start, end);
+  // The ONLY class name mentioned anywhere in the canvas gate is "Portal" - proving
+  // Character/Reactive can never take the gated branch, by construction, not by convention.
+  assert.deepEqual([...gate.matchAll(/"\w+"/g)].map((m) => m[0]), ['"Portal"']);
+  assert.equal(gate.includes("handleMenuInteraction"), true, "the gated branch itself must still exist, for Portal");
+  assert.equal([...gate.matchAll(/\bhandleMenuInteraction\s*\(/g)].length, 1, "exactly one call, inside the Portal-only branch");
+});
+
+test("CB29. D2 Step 2 (behavioral): handleMenuInteraction's real, shipped body - executed directly with faked collaborators - branches exactly as the locked contract requires for every decision, and forwards `action` only through reconcileContext's onFresh slot", () => {
+  const code = compositionCode();
+  const start = code.indexOf("function handleMenuInteraction(action: () => void): void {");
+  const braceStart = code.indexOf("{", start);
+  const end = code.indexOf("\n    }\n", start);
+  // Strip the one TypeScript-only type annotation inside the body (its own signature is
+  // already excluded by slicing from `braceStart`) so plain new Function() can parse it.
+  const body = code.slice(braceStart + 1, end).replace(/:\s*ExperienceSnapshotView \| null(?!\w)/g, "");
+  assert.ok(!/:\s*ExperienceSnapshotView/.test(body), "sanity: the type annotation was actually stripped");
+  const fn = new Function(
+    "action",
+    "lifecycle",
+    "snapshots",
+    "report",
+    "decideTakeover",
+    "presentImmediate",
+    "routeCustomerReturn",
+    "reconcileContext",
+    body,
+  ) as (
+    action: () => void,
+    lifecycle: { consumeGesture(): { phaseBefore: string } | null } | null,
+    snapshots: { getSnapshot(): unknown },
+    report: (e: unknown) => void,
+    decideTakeover: (i: unknown) => string,
+    presentImmediate: (d: unknown) => void,
+    routeCustomerReturn: (s: unknown) => unknown,
+    reconcileContext: (d: unknown, s: unknown, c: string, e: (p: string) => boolean, onFresh?: () => void) => void,
+  ) => void;
+
+  const noGesture = { consumeGesture: () => null };
+  const withGesture = { consumeGesture: () => ({ phaseBefore: "RELEASED" }) };
+  const snap = { getSnapshot: () => ({ ready: true }) };
+
+  // No fresh gesture: action runs immediately, nothing else is ever touched.
+  {
+    let calls = 0;
+    fn(
+      () => calls++,
+      noGesture,
+      snap,
+      () => assert.fail("report"),
+      () => assert.fail("decideTakeover"),
+      () => assert.fail("presentImmediate"),
+      () => assert.fail("routeCustomerReturn"),
+      () => assert.fail("reconcileContext"),
+    );
+    assert.equal(calls, 1);
+  }
+
+  // NO_TAKEOVER: action runs immediately.
+  {
+    let calls = 0;
+    fn(
+      () => calls++,
+      withGesture,
+      snap,
+      () => assert.fail("report"),
+      () => "NO_TAKEOVER",
+      () => assert.fail("presentImmediate"),
+      () => assert.fail("routeCustomerReturn"),
+      () => assert.fail("reconcileContext"),
+    );
+    assert.equal(calls, 1);
+  }
+
+  // BLOCKED_UNKNOWN and NOT_READY: presentImmediate(routeCustomerReturn(snapshot)) runs, action never does.
+  for (const decision of ["BLOCKED_UNKNOWN", "NOT_READY"]) {
+    let calls = 0;
+    let presented: unknown = null;
+    fn(
+      () => calls++,
+      withGesture,
+      snap,
+      () => assert.fail("report"),
+      () => decision,
+      (d: unknown) => (presented = d),
+      (s: unknown) => ({ routedFrom: s }),
+      () => assert.fail("reconcileContext"),
+    );
+    assert.equal(calls, 0, `action must not run for ${decision}`);
+    assert.deepEqual(presented, { routedFrom: { ready: true } });
+  }
+
+  // TAKEOVER_*: reconcileContext runs with cause "TAKEOVER", an eligible predicate equivalent to
+  // plan => plan === "RELEASE", and `action` forwarded as its onFresh continuation - never called
+  // directly by handleMenuInteraction itself.
+  for (const decision of ["TAKEOVER_ACTIVE_CART", "TAKEOVER_CONFIRMATION"]) {
+    let calls = 0;
+    let seenCause = "";
+    let seenEligible: ((p: string) => boolean) | null = null;
+    let seenOnFresh: (() => void) | undefined;
+    fn(
+      () => calls++,
+      withGesture,
+      snap,
+      () => assert.fail("report"),
+      () => decision,
+      () => assert.fail("presentImmediate"),
+      (s: unknown) => ({ routedFrom: s }),
+      (_d: unknown, _s: unknown, cause: string, eligible: (p: string) => boolean, onFresh?: () => void) => {
+        seenCause = cause;
+        seenEligible = eligible;
+        seenOnFresh = onFresh;
+      },
+    );
+    assert.equal(calls, 0, "handleMenuInteraction never calls action itself for a takeover - only reconcileContext's own settlement may");
+    assert.equal(seenCause, "TAKEOVER");
+    assert.equal(seenEligible!("RELEASE"), true);
+    assert.equal(seenEligible!("NONE_TO_RELEASE"), false);
+    assert.equal(seenEligible!("PROTECTED"), false);
+    assert.equal(seenEligible!("NOT_READY"), false);
+    // The forwarded onFresh IS `action` itself - calling it is exactly calling the original action.
+    seenOnFresh!();
+    assert.equal(calls, 1);
+  }
+
+  // An unreadable snapshot fails closed: decideTakeover receives null, never throws out of the gate.
+  {
+    const throwing = { getSnapshot: () => { throw new Error("boom"); } };
+    let reported = 0;
+    let seenSnapshot: unknown = "unset";
+    fn(
+      () => assert.fail("action"),
+      withGesture,
+      throwing,
+      () => reported++,
+      (input: { snapshot: unknown }) => {
+        seenSnapshot = input.snapshot;
+        return "NOT_READY";
+      },
+      () => {},
+      (s: unknown) => s,
+      () => assert.fail("reconcileContext"),
+    );
+    assert.equal(reported, 1);
+    assert.equal(seenSnapshot, null, "fail closed: an unreadable Domain is null, never a guess");
+  }
 });
 
 // ============================================================

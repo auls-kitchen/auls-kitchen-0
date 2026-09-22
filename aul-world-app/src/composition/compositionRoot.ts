@@ -184,7 +184,9 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
     const shell = createExperienceShell(root, {
       domainStatus: host.getBootstrapStatus(),
       // The customer's own Menu action: the same MENU_INTENT a canvas portal tap emits.
-      onMenu: () => bus.emit({ type: "MENU_INTENT", source: "dom", forceReject: false }),
+      // D2 Step 2: gated by the same Menu/Product takeover check as the canvas Portal -
+      // see handleMenuInteraction below.
+      onMenu: () => handleMenuInteraction(() => bus.emit({ type: "MENU_INTENT", source: "dom", forceReject: false })),
       // Home/X: the lifecycle latched the phase before the customer's press; the
       // shell only calls this for a trusted click that has one.
       consumeGesture: () => lifecycle?.consumeGesture() ?? null,
@@ -252,8 +254,25 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
     cleanups.push(unsubscribeBus);
 
     // CUSTOMER INPUT -> HIT TEST (renderer) -> OBJECT ID -> intent -> event.
-    // Always reads the latest state.
+    // Always reads the latest state. D2 Step 2 (corrected scope): ONLY a Portal
+    // hit goes through the SAME Menu/Product takeover gate the shell Menu
+    // button uses, BEFORE the exact, unmodified handleObjectHit(...) call below
+    // ever runs. Character/Reactive/Decorative/Event are explicitly OUT of D2:
+    // no Owner-locked record ever named them as takeover triggers, and routing
+    // them through decideTakeover's any-phase BLOCKED_UNKNOWN/NOT_READY
+    // semantics would suppress ordinary world interaction that P1/P2, BD2/BD3,
+    // R6 and W1 already establish as unconditional - so they always take the
+    // exact, unmodified handleObjectHit(...) call directly, exactly as before
+    // this slice. The class check reads only the object's own `class` field
+    // already on `state` - it never imports or calls AWR's intentFor, and never
+    // re-derives which event handleObjectHit will emit; that classification
+    // stays entirely inside hitTestPipeline.ts, untouched.
     renderer.onObjectPointerDown((objectId, source) => {
+      const obj = state.objects.find((candidate) => candidate.id === objectId);
+      if (obj !== undefined && obj.class === "Portal") {
+        handleMenuInteraction(() => handleObjectHit(state, objectId, source, bus));
+        return;
+      }
       handleObjectHit(state, objectId, source, bus);
     });
 
@@ -427,6 +446,56 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
           presentImmediate(freshDecision);
         }
       });
+    }
+
+    // D2 Step 2: the Menu/Product first-press takeover gate. Shared by the shell
+    // Menu button and the canvas Menu Portal ONLY (see renderer.onObjectPointerDown
+    // above) - the ONE place this decision is made, so there is exactly one
+    // Menu/Product business path, not two. Character/Reactive are deliberately
+    // NOT routed here (Owner-corrected scope: no prior lock ever named them, and
+    // decideTakeover's any-phase BLOCKED_UNKNOWN/NOT_READY would otherwise
+    // suppress ordinary world interaction P1/P2/BD2/BD3/R6/W1 already establish
+    // as unconditional). `action` is always the caller's own, unmodified
+    // interaction (a bus.emit or a handleObjectHit call); this gate never
+    // re-derives or duplicates it.
+    //
+    // No fresh gesture (the common case: not the first press since the window
+    // last restarted) forwards `action` immediately, exactly as before this
+    // slice. A fresh gesture is evaluated with the same, unmodified
+    // decideTakeover policy Home/X already uses: NO_TAKEOVER forwards `action`
+    // immediately; NOT_READY and BLOCKED_UNKNOWN both present the existing
+    // customer-return view for the snapshot (waiting / protected, decided by
+    // routeCustomerReturn itself) and suppress `action` entirely; an accepted
+    // takeover reconciles for real through the exact same reconcileContext a
+    // wake/reboot/Home takeover already uses, and `action` is forwarded only
+    // once that reconciliation's OWN release settles FRESH - via the additive
+    // onFresh continuation from D2 Step 1, never tied to worldQuiet, never a
+    // second callback/settlement primitive/verdict/reset path. A verdict other
+    // than FRESH (UNAVAILABLE) presents the existing unavailable view and never
+    // forwards `action`, exactly like Home's own takeover today.
+    function handleMenuInteraction(action: () => void): void {
+      const gesture = lifecycle?.consumeGesture() ?? null;
+      if (gesture === null) {
+        action();
+        return;
+      }
+      let snapshot: ExperienceSnapshotView | null = null;
+      try {
+        snapshot = snapshots.getSnapshot();
+      } catch (error) {
+        report(error);
+        // Fail closed: an unreadable Domain is NOT_READY, never "no ticket".
+      }
+      const decision = decideTakeover({ phaseBefore: gesture.phaseBefore, snapshot });
+      if (decision === "NO_TAKEOVER") {
+        action();
+        return;
+      }
+      if (decision === "BLOCKED_UNKNOWN" || decision === "NOT_READY") {
+        presentImmediate(routeCustomerReturn(snapshot));
+        return;
+      }
+      reconcileContext(routeCustomerReturn(snapshot), snapshot, "TAKEOVER", (plan) => plan === "RELEASE", action);
     }
 
     // CONTEXT_EXPIRED: read ONE snapshot and, only for a releasable customer
