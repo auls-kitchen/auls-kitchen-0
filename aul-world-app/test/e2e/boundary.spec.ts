@@ -261,3 +261,44 @@ test("BD11. no unconditional boot read: mount, let hydration finish, nobody ever
   expect(status).toBe("READY");
   expect(await snapshotReads(page)).toBe(0); // still zero: READY alone never reads (no waiter was pending)
 });
+
+test("BD12. a hydrated CONFIRMATION with NO boot-time waiter sits untouched until the FIRST real wake reconciles it - under WAKE_RECONCILE, not REBOOT_BOUNDARY, and never through a stale/prior context", async ({ page }) => {
+  // Persist a real, authoritative CONFIRMATION under the fixed fake identity.
+  await mount(page);
+  await freezeTime(page);
+  await tapWorld(page, AWR.emptySpace);
+  await u3(page, async (api) => {
+    api.domain.addItem();
+    await api.domain.submit();
+  });
+  expect(await domain(page)).toMatchObject({ session: "confirmation", orderStatus: "CONFIRMED" });
+  await u3(page, (api) => api.dispose());
+
+  // Remount with the ORDINARY mount() helper (no gateAuth): hydration completes with
+  // NOBODY present, so no waiter ever forms and reroutePendingWaiter() has nothing to do -
+  // this is deliberately the OPPOSITE setup from BD9.
+  await mount(page);
+  await freezeTime(page);
+
+  // Proof of "no boot-time waiter": READY, the hydrated CONFIRMATION is sitting there
+  // completely unread and unreleased, and no view was ever "waiting" for it.
+  expect(await attribute(page, "data-domain-status")).toBe("READY");
+  expect(await snapshotReads(page)).toBe(0);
+  expect(await releaseCalls(page)).toBe(0);
+  expect(await attribute(page, "data-view")).toBe("habitat"); // never touched "waiting" at all
+  expect(await u3(page, (api) => api.domain.persisted())).toMatchObject({ hasAuthoritativeResult: true });
+
+  // The FIRST real customer's wake - not a reboot waiter, not a second/contested attempt -
+  // is the one and only thing that reads this snapshot and reconciles it.
+  await tapWorld(page, AWR.emptySpace);
+
+  await expect.poll(() => lastWake(page)).toEqual({ route: "DISCOVER_MENU", pending: "NONE" });
+  await expect.poll(() => domain(page)).toMatchObject({ session: "idle", cartLines: 0 });
+  expect(await u3(page, (api) => api.domain.persisted())).toMatchObject({ hasAuthoritativeResult: false });
+  expect(await releaseCalls(page)).toBe(1); // reconciled exactly once
+  // Exactly the wake's own ONE read (the uncontested fast path, same shape as BD6) - no extra
+  // read from any earlier/stale attempt, because there was none.
+  expect(await snapshotReads(page)).toBe(1);
+  expect((await counters(page)).violations).toEqual([]);
+  expect((await events(page)).errors).toEqual([]);
+});
