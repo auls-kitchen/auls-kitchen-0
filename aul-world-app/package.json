@@ -8,6 +8,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "node --test \"test/unit/**/*.test.ts\"",
     "build:e2e": "node scripts/buildE2e.mjs",
+    "build:prod": "node scripts/buildProd.mjs",
     "test:e2e": "playwright test",
     "verify:frozen": "node --test test/gates/frozenBoundary.test.ts"
   },
