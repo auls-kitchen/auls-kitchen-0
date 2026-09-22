@@ -161,12 +161,15 @@ test("E6. Habitat entry does NOT touch AWR when it is not in ORDERING (Aul focus
 
 test("E7. the 15s / 25s lifecycle never touches the Domain, and the 5min expiry's ONLY Domain effect is the one guarded release (orders, identity untouched)", async ({ page }) => {
   await mount(page);
-  await page.evaluate(() => (window as any).__u3.domain.addItem());
   await freezeTime(page);
+  // U4 S4b: the wake itself may now reconcile a releasable context, so the item is added
+  // AFTER arriving (the real production order) - an empty Domain at the wake reconciles
+  // to nothing, exactly as it always did before S4b.
+  await tapWorld(page, AWR.emptySpace);
+  await page.evaluate(() => (window as any).__u3.domain.addItem());
   const before = await domain(page);
   expect(before).toMatchObject({ session: "active", cartLines: 1, orderStatus: "NONE" });
 
-  await tapWorld(page, AWR.emptySpace);
   await advance(page, 15_000);
   await advance(page, 10_000);
   await advance(page, 274_999);

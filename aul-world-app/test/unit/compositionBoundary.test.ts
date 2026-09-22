@@ -227,18 +227,22 @@ test("CB14. S3: the Domain release is named ONCE, as the coordinator's injected 
   assert.equal([...code.matchAll(/\bcreateContextTransitions\s*\(/g)].length, 1, "exactly one coordinator");
 });
 
-test("CB15. S3: the expiry handler reads ONE snapshot, applies releasePlanFor, and only for RELEASE starts a release with cause EXPIRY - fire and forget", () => {
+test("CB15. S4b: the expiry handler reads ONE snapshot, applies releasePlanFor, and only for RELEASE acquires boundary ownership of the CURRENT epoch before releasing with cause EXPIRY - and a refused ownership never releases", () => {
   const handler = expiryHandler();
   const read = handler.indexOf("snapshots.getSnapshot()");
   const plan = handler.indexOf('releasePlanFor(snapshot) !== "RELEASE"');
+  const own = handler.indexOf("boundary.own(");
   const release = handler.indexOf('void transitions.release("EXPIRY")');
-  assert.ok(read > 0 && plan > read && release > plan, "read, then plan guard, then release - in that order");
+  assert.ok(read > 0 && plan > read && own > plan && release > own, "read, then plan guard, then acquire ownership, then release - in that order");
   assert.equal([...handler.matchAll(/getSnapshot\s*\(/g)].length, 1, "exactly one snapshot read");
-  assert.equal([...compositionCode().matchAll(/\btransitions\s*\.\s*release\s*\(/g)].length, 1, "one release call in the whole composition");
-  assert.equal([...compositionCode().matchAll(/\breleasePlanFor\s*\(/g)].length, 1, "one plan guard");
-  // The verdict is neither awaited nor inspected, and nothing is presented because of it.
-  for (const forbidden of ["await", ".then", ".catch", "verdict", "shell.", "setWake", "setPhase", "bus.", "onWake", "onPhase", "RESET_WORLD", "RETURN_TO_WORLD", "OBJECT_INTERACTED"]) {
-    assert.equal(handler.includes(forbidden), false, `the expiry handler must not use ${forbidden}`);
+  assert.match(handler, /if \(!owned\) return;/, "a refused ownership attempt returns without ever calling release");
+  // Three release call sites now exist in the whole file: expiry (here), and the wake/reboot
+  // reconciler's fast and contested paths (reconcileContext) - every one of them guarded the
+  // same way, by exactly one boundary.own() immediately before it.
+  assert.equal([...compositionCode().matchAll(/\btransitions\s*\.\s*release\s*\(/g)].length, 3, "expiry + reconcileContext's two release call sites");
+  assert.equal([...compositionCode().matchAll(/\bboundary\s*\.\s*own\s*\(/g)].length, 3, "one own() guarding each release call site");
+  for (const forbidden of ["await", ".then", ".catch", "shell.", "setWake", "setPhase", "bus.", "onWake", "onPhase"]) {
+    assert.equal(handler.includes(forbidden), false, `the expiry handler must not use ${forbidden} directly - only its owned continuation (resetWorld) may`);
   }
 });
 
@@ -255,25 +259,92 @@ test("CB16. S3: the lifecycle gets the handler; the coordinator is created befor
   assert.equal([...code.matchAll(/\bonContextExpired\s*:/g)].length, 1);
 });
 
-test("CB17. S3: nothing of S4 entered the Composition - only the three already-approved AWR events, no world reset, no takeover release, no reconcile", () => {
+test("CB17. S4b: RESET_WORLD/RETURN_TO_WORLD are emitted from ONE function, in that order, gated by FRESH + worldQuiet, and nothing of takeover/S4c has entered the Composition", () => {
   const code = compositionCode();
-  const emitted = [...code.matchAll(/bus\.emit\(\s*\{\s*type:\s*"(\w+)"/g)].map((m) => m[1]).sort();
-  assert.deepEqual(emitted, ["MENU_INTENT", "RETURN_TO_WORLD", "TICK"]);
-  for (const forbidden of [
-    "RESET_WORLD",
-    "DOM_PANEL_ACTION",
-    "OBJECT_INTERACTED",
-    "afterSettle",
-    "isSettling",
-    "classifyReleaseResult",
-    "WAKE_RECONCILE",
-    "REBOOT_BOUNDARY",
-    '"TAKEOVER"',
-    "UNAVAILABLE",
-    "unavailable",
-  ]) {
-    assert.equal(code.includes(forbidden), false, `the composition must not contain ${forbidden} yet`);
+  const emitted = [...new Set([...code.matchAll(/bus\.emit\(\s*\{\s*type:\s*"(\w+)"/g)].map((m) => m[1]))].sort();
+  assert.deepEqual(emitted, ["DOM_PANEL_ACTION", "MENU_INTENT", "RETURN_TO_WORLD", "TICK"]);
+  // RETURN_TO_WORLD now has two legitimate source occurrences: enterHabitat's own
+  // presentation.returnToWorld (unrelated to this feature, unchanged) and resetWorld's.
+  assert.equal([...code.matchAll(/type:\s*"RETURN_TO_WORLD"/g)].length, 2, "enterHabitat's own returnToWorld, plus resetWorld's");
+  assert.equal([...code.matchAll(/function resetWorld\(\)\s*:\s*void\s*\{/g)].length, 1, "exactly one resetWorld function");
+  const start = code.indexOf("function resetWorld(): void {");
+  // A fixed-size window past the opening brace: the two emit() calls each contain their
+  // own object-literal "}", so the FIRST "}" in the text is not the function's own.
+  const body = code.slice(start, start + 250);
+  const resetAt = body.indexOf('action: "RESET_WORLD"');
+  const returnAt = body.indexOf('type: "RETURN_TO_WORLD"');
+  assert.ok(resetAt > 0 && returnAt > resetAt, "RESET_WORLD is emitted before RETURN_TO_WORLD, from the same function");
+  // Both call sites (the expiry owner's own callback, and presentFinal for wake/reboot) use the
+  // exact same gate - no reset is ever reachable any other way.
+  assert.equal([...code.matchAll(/\bresetWorld\s*\(\s*\)/g)].length, 3, "the definition plus exactly two call sites");
+  assert.equal(
+    [...code.matchAll(/if \(verdict === "FRESH" && boundary\.worldQuiet\(token\)\) resetWorld\(\);/g)].length,
+    2,
+    "both reset call sites are gated by the identical FRESH + worldQuiet check",
+  );
+  // touch is noted from customer-caused AWR events only, and consulted only by worldQuiet -
+  // it is never read by own()/isCurrent(), so it can never authorize anything.
+  assert.match(code, /boundary\.noteWorldTouch\(\)/);
+  assert.equal([...code.matchAll(/\bboundary\s*\.\s*noteWorldTouch\s*\(\s*\)/g)].length, 1, "noted from exactly one place: the bus subscriber");
+  for (const forbidden of ["OWNERSHIP_CONFIRMATION", "data-pending", "hasPendingTicket", '"TAKEOVER"']) {
+    assert.equal(code.includes(forbidden), false, `the composition must not contain ${forbidden}`);
   }
+});
+
+test("CB18. S4b: touch is never presentation/release authority - neither the eligibility predicates NOR reconcileContext's own eligibility guards ever consult worldQuiet", () => {
+  const code = compositionCode();
+  const wakeCall = code.indexOf('reconcileContext(decision, snapshot, "WAKE_RECONCILE"');
+  const rebootCall = code.indexOf('reconcileContext(routeCustomerReturn(snapshot), snapshot, "REBOOT_BOUNDARY"');
+  assert.ok(wakeCall > 0 && rebootCall > 0, "both reconcileContext call sites must be found");
+  const wakeEligible = code.slice(wakeCall, code.indexOf(";", wakeCall));
+  const rebootEligible = code.slice(rebootCall, code.indexOf(";", rebootCall));
+  for (const eligible of [wakeEligible, rebootEligible]) {
+    assert.equal(eligible.includes("worldQuiet"), false, `an eligibility predicate must never consult worldQuiet: ${eligible}`);
+  }
+  // eligible() itself is defined with exactly the (plan, snapshot) signature reconcileContext expects -
+  // no third parameter through which a token/touch could sneak in.
+  assert.match(code, /eligible: \(plan: ReleasePlan, snapshot: ExperienceSnapshotView \| null\) => boolean,/);
+  // The two eligibility GUARDS inside reconcileContext itself (fast path setup, and the contested
+  // path's re-evaluation) test eligible() alone - worldQuiet is used ONLY inside presentFinal, to
+  // gate the optional reset, never to decide whether to reconcile at all.
+  assert.equal([...code.matchAll(/if \(!eligible\(/g)].length, 2, "both eligibility guards");
+  assert.equal(code.includes("|| !boundary.worldQuiet") || code.includes("!boundary.worldQuiet(token) ||"), false, "no eligibility guard OR's in a worldQuiet check");
+  assert.equal([...code.matchAll(/\bboundary\s*\.\s*worldQuiet\s*\(/g)].length, 2, "worldQuiet is read in exactly two places - both inside presentFinal's reset gate");
+});
+
+test("CB19. S4b: reconcileContext's own() attempts never retry or loop - a refused attempt presents immediately and gives up, exactly once per call site", () => {
+  const code = compositionCode();
+  const ownSites = [...code.matchAll(/\bboundary\s*\.\s*own\s*\(/g)];
+  assert.equal(ownSites.length, 3, "expiry + reconcileContext's fast and contested paths");
+  for (const site of ownSites) {
+    // A generous window around each own() call site must contain no loop construct.
+    const window = code.slice(Math.max(0, site.index! - 200), site.index! + 300);
+    for (const loopKeyword of [/\bwhile\s*\(/, /\bfor\s*\(/, /\.retry\b/]) {
+      assert.equal(loopKeyword.test(window), false, `own() call site must not be wrapped in a retry loop: ${loopKeyword}`);
+    }
+  }
+  // Every own() call site's boolean result is tested directly (as an if-condition, or assigned
+  // and then checked once) - never ignored, and never re-attempted with the same token.
+  const testedDirectly = [...code.matchAll(/if \(boundary\.own\(token,/g)].length + [...code.matchAll(/const owned = boundary\.own\(token,/g)].length;
+  assert.equal(testedDirectly, 3, "every own() call site tests its own boolean result directly");
+});
+
+test("CB20. S4b: reconcileContext establishes the epoch (beginEpoch) BEFORE deriving the release plan or checking eligibility - never after", () => {
+  const code = compositionCode();
+  const fnStart = code.indexOf("function reconcileContext(");
+  const fnBody = code.slice(fnStart, code.indexOf("\n    }\n", fnStart));
+  const beginEpoch = fnBody.indexOf("boundary.beginEpoch()");
+  const plan = fnBody.indexOf("releasePlanFor(snapshot)");
+  const eligible = fnBody.indexOf("eligible(plan, snapshot)");
+  assert.ok(beginEpoch > 0 && plan > beginEpoch && eligible > plan, "beginEpoch, then the plan, then the eligibility check - in that order");
+});
+
+test("CB21. S4b: the reboot boundary's eligibility is CONFIRMATION only - never a bare RELEASE plan, so a hypothetical ACTIVE cart is never reconciled at reboot", () => {
+  const code = compositionCode();
+  const rebootCall = code.indexOf('reconcileContext(routeCustomerReturn(snapshot), snapshot, "REBOOT_BOUNDARY"');
+  const rebootEligible = code.slice(rebootCall, code.indexOf(";", rebootCall));
+  assert.match(rebootEligible, /classifyPending\(s\) === "CONFIRMATION"/);
+  assert.match(rebootEligible, /plan === "RELEASE" && classifyPending/, "RELEASE alone is not sufficient - CONFIRMATION must also hold");
 });
 
 // ============================================================

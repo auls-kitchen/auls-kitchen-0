@@ -43,7 +43,7 @@
 // One instance per mount, no module-level state. Re-mounting means creating a
 // new instance after dispose(); a disposed instance cannot be started again.
 
-import type { Clock, CustomerInputKind, PresentationOutPort, Scheduler, SnapshotReadPort } from "../contracts.ts";
+import type { Clock, CustomerInputKind, ExperienceSnapshotView, PresentationOutPort, Scheduler, SnapshotReadPort } from "../contracts.ts";
 import { attachCustomerInput } from "./customerInput.ts";
 import type { CustomerInputBinding, InteractiveTargetPredicate } from "./customerInput.ts";
 import type { InteractionPhase, InteractionThresholds, RestingPhase } from "./interactionContext.ts";
@@ -83,8 +83,11 @@ export interface ExperienceLifecycleOptions {
   // never awaited; a synchronous throw or a rejection is reported through onError.
   // Never called after dispose(), at boot, or for the 15s / 25s phases.
   readonly onContextExpired?: () => void | Promise<void>;
-  // Called once per wake from HABITAT_IDLE with where the customer should go.
-  readonly onWake?: (decision: WakeDecision) => void;
+  // Called once per wake from HABITAT_IDLE with where the customer should go, and
+  // the very snapshot that decision was read from (S4b: an additive handoff, so a
+  // caller that needs to reconcile the decision never has to read the Domain a
+  // second time on the uncontested path). null only if that one read threw.
+  readonly onWake?: (decision: WakeDecision, snapshot: ExperienceSnapshotView | null) => void;
   readonly onError?: (error: unknown) => void;
 }
 
@@ -145,17 +148,20 @@ export function createExperienceLifecycle(options: ExperienceLifecycleOptions): 
   }
 
   function wake(): void {
+    let snapshot: ExperienceSnapshotView | null;
     let decision: WakeDecision;
     try {
       // Exactly one snapshot read per wake, taken at the moment of input.
-      decision = routeCustomerReturn(snapshots.getSnapshot());
+      snapshot = snapshots.getSnapshot();
+      decision = routeCustomerReturn(snapshot);
     } catch (error) {
       report(error);
       // Fail closed: an unreadable Domain is "not ready", never "no ticket".
+      snapshot = null;
       decision = routeCustomerReturn(null);
     }
     try {
-      onWake?.(decision);
+      onWake?.(decision, snapshot);
     } catch (error) {
       report(error);
     }

@@ -289,9 +289,12 @@ test("D1. an in-flight order settles while the kiosk is in Habitat: the Experien
   expect((await counters(page)).portCalls.getSnapshot).toBe(readsBefore);
 
   await tapWorld(page, AWR.emptySpace);
-  // The order settled AFTER the expiry, so the return finds a CONFIRMATION nobody has released. With no verdict the
-  // lifecycle's routing is the fail-closed neutral route (reconciling it is a later slice): never an ownership question.
-  expect((await events(page)).wakes.at(-1)).toEqual({ route: "UNAVAILABLE_NEUTRAL", pending: "CONFIRMATION" });
+  // U4 S4b: the order settled AFTER the expiry, so the return finds a CONFIRMATION nobody has
+  // released - the wake itself now reconciles it (WAKE_RECONCILE). Presentation is deferred
+  // until that release settles (no intermediate flash), so this polls; nothing blocks a genuine
+  // CONFIRMATION release, so it succeeds for real and the return is routed fresh.
+  await expect.poll(async () => (await events(page)).wakes.at(-1)).toEqual({ route: "DISCOVER_MENU", pending: "NONE" });
+  await expect.poll(() => domain(page)).toMatchObject({ session: "idle", cartLines: 0 });
 });
 
 // ============================================================

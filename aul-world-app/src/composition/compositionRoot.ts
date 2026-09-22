@@ -42,13 +42,16 @@ import { createExperienceLifecycle } from "../experience/createExperienceLifecyc
 import type { ExperienceLifecycle } from "../experience/createExperienceLifecycle.ts";
 import type { InteractiveTargetPredicate } from "../experience/customerInput.ts";
 import type { InteractionPhase, InteractionThresholds, RestingPhase } from "../experience/interactionContext.ts";
-import { releasePlanFor, routeCustomerReturn } from "../experience/pendingTicket.ts";
-import type { WakeDecision } from "../experience/pendingTicket.ts";
+import { classifyPending, releasePlanFor, routeCustomerReturn } from "../experience/pendingTicket.ts";
+import type { ReleasePlan, WakeDecision } from "../experience/pendingTicket.ts";
 import { createMonotonicClock, createTimeoutScheduler } from "../experience/silenceTimer.ts";
 import { decideTakeover } from "../experience/takeoverPolicy.ts";
 import type { TakeoverDecision } from "../experience/takeoverPolicy.ts";
 import { createExperienceShell } from "../shell/experienceShell.ts";
+import { createContextBoundary } from "./contextBoundary.ts";
+import type { BoundaryToken } from "./contextBoundary.ts";
 import { createContextTransitions } from "./contextTransitions.ts";
+import type { ReleaseCause, ReleaseVerdict } from "./contextTransitions.ts";
 
 // The whole Domain surface the Composition may touch, structurally typed so
 // nothing here imports Kiosk code. The Kiosk Host returned by
@@ -223,6 +226,13 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
     const unsubscribeBus = bus.subscribe((event: AppEvent) => {
       state = reduce(state, event);
       orderingState = reduceOrdering(orderingState, event);
+      // Secondary, input-order protection only (S4b): a customer-caused World event
+      // vetoes an in-flight reconciliation's optional World reset. It never authorizes
+      // presentation or a release, and never revokes an epoch's authority - see
+      // contextBoundary.ts and its worldQuiet()/isCurrent() distinction.
+      if (event.type === "OBJECT_INTERACTED" || event.type === "CAMERA_FOCUS_REQUESTED" || event.type === "MENU_INTENT") {
+        boundary.noteWorldTouch();
+      }
       renderAll();
       if (event.type === "MENU_INTENT") {
         bus.emit(decideOrderingOutcome(event));
@@ -257,22 +267,130 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
 
     renderAll();
 
+    // --- Context boundary: the stale-context guard (S4b) ---------------------
+    // Generation is the SOLE authority for whether a settled release may still
+    // affect presentation or the World: isCurrent()/own()/settle() all key on it
+    // alone. `touch` is secondary and only ever vetoes the OPTIONAL World reset
+    // below (worldQuiet) - it can never authorize a presentation or a release,
+    // and never makes an epoch stale (see contextBoundary.ts; not modified here).
+    //
+    // `currentToken` is the epoch a release started NOW would belong to. It only
+    // ever advances at a customer arrival (a wake, or the hydration reboot
+    // boundary) - never at expiry itself, which always acts under whichever
+    // epoch is already current.
+    const boundary = createContextBoundary<ReleaseVerdict>();
+    let currentToken: BoundaryToken = boundary.beginEpoch();
+    cleanups.push(() => boundary.dispose());
+
+    // The ONE place RESET_WORLD/RETURN_TO_WORLD are ever emitted: only from an
+    // authorized, still-current boundary continuation, and only for the exact
+    // FRESH verdict of a context this Composition itself released. Sequential
+    // and synchronous (the bus is not re-entrant here: this runs from a Promise
+    // continuation, never from inside another bus.emit's own subscriber call).
+    function resetWorld(): void {
+      bus.emit({ type: "DOM_PANEL_ACTION", action: "RESET_WORLD" });
+      bus.emit({ type: "RETURN_TO_WORLD", source: "dom" });
+    }
+
+    function isReleaseSettled(event: unknown): event is { readonly type: "RELEASE_SETTLED"; readonly verdict: ReleaseVerdict } {
+      return typeof event === "object" && event !== null && (event as { readonly type?: unknown }).type === "RELEASE_SETTLED";
+    }
+
     // --- Context transitions: the ONE Domain release seam --------------------
     // The Domain's guarded release is handed to the coordinator as a plain
     // function; this is the only place it is named. Created BEFORE the lifecycle,
     // so on dispose (reverse order) the timer stops first and the coordinator
-    // is disposed after it.
+    // is disposed after it. onTransition feeds the boundary's settlement -
+    // dropped by the coordinator itself once disposed, so a late outcome after
+    // dispose is discarded there (contextTransitions.ts is unmodified).
     const transitions = createContextTransitions({
       release: () => host.orchestrator.releaseCustomerContext(),
+      onTransition: (event) => {
+        if (isReleaseSettled(event)) boundary.settle(event.verdict);
+      },
       onError: report,
     });
     cleanups.push(() => transitions.dispose());
 
+    // Presents a decision through the existing shell + external hook, with no
+    // release involved (the fail-closed default, or nothing was releasable).
+    function presentImmediate(decision: WakeDecision): void {
+      shell.setWake(decision);
+      try {
+        options.onWake?.(decision);
+      } catch (error) {
+        report(error);
+      }
+    }
+
+    // Presents the FINAL decision for a release this Composition owns, once its
+    // verdict is known. Only ever called from inside boundary.own()'s registered
+    // continuation, itself only invoked by settle() while the token is current -
+    // so no staleness check is needed here; it is already guaranteed.
+    function presentFinal(token: BoundaryToken, snapshot: ExperienceSnapshotView | null, verdict: ReleaseVerdict): void {
+      presentImmediate(routeCustomerReturn(snapshot, verdict));
+      if (verdict === "FRESH" && boundary.worldQuiet(token)) resetWorld();
+    }
+
+    // The one reconciliation entry point shared by a wake and the reboot boundary
+    // (S4b). `eligible` decides which release plans this caller may reconcile
+    // (a wake reconciles any releasable context; the reboot boundary reconciles
+    // CONFIRMATION only - see their call sites). Never joins another owner's
+    // release, never consumes another owner's verdict, never retries: if
+    // own() fails (the epoch already has an owner), it fails closed to an
+    // immediate, verdict-less presentation.
+    function reconcileContext(
+      decision: WakeDecision,
+      snapshot: ExperienceSnapshotView | null,
+      cause: ReleaseCause,
+      eligible: (plan: ReleasePlan, snapshot: ExperienceSnapshotView | null) => boolean,
+    ): void {
+      const token = boundary.beginEpoch();
+      currentToken = token;
+      const plan = releasePlanFor(snapshot);
+      if (!eligible(plan, snapshot)) {
+        presentImmediate(decision);
+        return;
+      }
+      if (!transitions.isSettling()) {
+        if (boundary.own(token, (verdict) => presentFinal(token, snapshot, verdict))) {
+          void transitions.release(cause);
+        } else {
+          presentImmediate(decision);
+        }
+        return;
+      }
+      // Contested: an earlier release is still in flight. Its verdict is never this
+      // customer's truth - wait for the coordinator to free up (no verdict from this),
+      // then read ONE fresh snapshot and decide entirely from that (the one, bounded,
+      // extra read the contested path is allowed).
+      transitions.afterSettle(() => {
+        if (!boundary.isCurrent(token)) return; // superseded by a still-newer arrival
+        let freshSnapshot: ExperienceSnapshotView | null = null;
+        try {
+          freshSnapshot = snapshots.getSnapshot();
+        } catch (error) {
+          report(error);
+        }
+        const freshDecision = routeCustomerReturn(freshSnapshot);
+        if (!eligible(releasePlanFor(freshSnapshot), freshSnapshot)) {
+          presentImmediate(freshDecision);
+          return;
+        }
+        if (boundary.own(token, (verdict) => presentFinal(token, freshSnapshot, verdict))) {
+          void transitions.release(cause);
+        } else {
+          presentImmediate(freshDecision);
+        }
+      });
+    }
+
     // CONTEXT_EXPIRED: read ONE snapshot and, only for a releasable customer
-    // context, start one guarded release. UNKNOWN / AWAITING_OUTCOME (PROTECTED),
-    // an idle session, and anything unreadable never reach the Domain. The
-    // verdict is deliberately not inspected or awaited: nothing is presented
-    // because of it (S3 is only this wiring).
+    // context, start one guarded release under the CURRENT epoch. UNKNOWN /
+    // AWAITING_OUTCOME (PROTECTED), an idle session, and anything unreadable
+    // never reach the Domain. A stale epoch's release still runs to completion
+    // in the Domain, but its verdict can never emit a World reset once a newer
+    // customer's arrival has made it stale (S4b; see contextBoundary.ts).
     function handleContextExpired(): void {
       let snapshot: ExperienceSnapshotView | null = null;
       try {
@@ -282,6 +400,11 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
         // Fail closed: an unreadable Domain is NOT_READY, and NOT_READY never releases.
       }
       if (releasePlanFor(snapshot) !== "RELEASE") return;
+      const token = currentToken;
+      const owned = boundary.own(token, (verdict) => {
+        if (verdict === "FRESH" && boundary.worldQuiet(token)) resetWorld();
+      });
+      if (!owned) return; // fail closed: another continuation already owns this epoch
       void transitions.release("EXPIRY");
     }
 
@@ -303,9 +426,12 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
         shell.setPhase(phase);
         options.onPhase?.(phase);
       },
-      onWake: (decision) => {
-        shell.setWake(decision);
-        options.onWake?.(decision);
+      // A wake begins a new customer epoch (S4b) before anything else: a stale
+      // release still settling from whoever left can never mutate this decision
+      // or the World once this line has run. Reconciles any releasable context
+      // (WAKE_RECONCILE); business reconciliation lives here, not in the lifecycle.
+      onWake: (decision, snapshot) => {
+        reconcileContext(decision, snapshot, "WAKE_RECONCILE", (plan) => plan === "RELEASE");
       },
       onContextExpired: handleContextExpired,
       onError: report,
@@ -322,22 +448,21 @@ export function mountAulWorld(options: MountAulWorldOptions): AulWorldHandle {
     frameHandle = requestAnimationFrame(tick);
 
     // A customer who arrived before the Domain was ready is routed again, once,
-    // now that a snapshot can be read. Read-only: it only re-runs the pure router.
+    // now that a snapshot can be read. This is also the ONLY reboot boundary
+    // (S4b): it never fires unless a waiter is actually pending (no unconditional
+    // boot read is ever added), and it reconciles a hydrated CONFIRMATION only -
+    // never a hypothetical ACTIVE cart (the Runtime never persists one). UNKNOWN /
+    // AWAITING_OUTCOME stay PROTECTED, exactly as releasePlanFor already refuses.
     function reroutePendingWaiter(): void {
       if (shell.getState().view !== "waiting" || experience.getPhase() === "HABITAT_IDLE") return;
-      let decision: WakeDecision;
+      let snapshot: ExperienceSnapshotView | null;
       try {
-        decision = routeCustomerReturn(snapshots.getSnapshot());
+        snapshot = snapshots.getSnapshot();
       } catch (error) {
         report(error);
         return;
       }
-      shell.setWake(decision);
-      try {
-        options.onWake?.(decision);
-      } catch (error) {
-        report(error);
-      }
+      reconcileContext(routeCustomerReturn(snapshot), snapshot, "REBOOT_BOUNDARY", (plan, s) => plan === "RELEASE" && classifyPending(s) === "CONFIRMATION");
     }
 
     host.beginCustomerSession().then(
