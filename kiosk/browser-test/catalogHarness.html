@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Kiosk Catalog Consumer Browser Verification Harness - TEST ONLY</title>
+</head>
+<body>
+<!--
+  Kiosk Catalog Consumer Foundation - browser verification harness.
+
+  TEST INFRASTRUCTURE ONLY - never part of production, never deployed.
+  Imports the generated artifacts from `npm run build:catalog-test`
+  (kiosk/dist/catalog-test/) and exercises them against REAL
+  window.indexedDB and REAL window.crypto.subtle - no fakes.
+
+  Database names are always supplied by the Playwright spec and are
+  test-scoped (kioskCatalogBrowserTest_*), never the production
+  aulKitchenKiosk.
+
+  The one test-only global, window.__catalogTest, exists ONLY here.
+-->
+<script type="module">
+  import catalogModule from "../dist/catalog-test/catalog/createBrowserCatalog.js";
+  import catalogStoreModule from "../dist/catalog-test/catalog/catalogIndexedDbStore.js";
+  import indexedDbModule from "../dist/catalog-test/persistence/indexedDbAdapter.js";
+  import persistenceModule from "../dist/catalog-test/persistence/persistenceAdapter.js";
+
+  const { createBrowserCatalog } = catalogModule;
+  const { createCatalogIndexedDbStore } = catalogStoreModule;
+  const { createIndexedDbStore } = indexedDbModule;
+  const { createPersistenceAdapter, STORAGE_KEY } = persistenceModule;
+
+  function toPlain(value) {
+    return JSON.parse(JSON.stringify(value === undefined ? null : value));
+  }
+
+  function openRaw(dbName, version, upgrade) {
+    return new Promise((resolve, reject) => {
+      const request = version ? indexedDB.open(dbName, version) : indexedDB.open(dbName);
+      if (upgrade) request.onupgradeneeded = () => upgrade(request.result);
+      request.onsuccess = () => resolve(request.result);
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  function summarize(result) {
+    if (!result.catalog) return toPlain(result);
+    return {
+      status: result.status,
+      source: result.source,
+      reason: result.reason,
+      persisted: result.persisted,
+      revision: result.catalog.revision,
+      productCount: result.catalog.products.length,
+      productIds: result.catalog.products.map((p) => p.productId),
+    };
+  }
+
+  window.__catalogTest = {
+    hasPrereqs: () => typeof indexedDB !== "undefined" && !!(crypto && crypto.subtle),
+
+    // Full real composition: real Read Port (window.fetch), real IndexedDB store, real service.
+    async loadCatalog(dbName) {
+      const catalog = createBrowserCatalog({ fetch: window.fetch.bind(window), dbConfig: { dbName } });
+      return summarize(await catalog.loadCatalog());
+    },
+
+    async readCatalogRecord(dbName) {
+      const record = await createCatalogIndexedDbStore({ dbName }).get();
+      return record ? { schemaVersion: record.schemaVersion, revision: record.revision, productCount: record.products.length, verifiedAt: record.verifiedAt } : null;
+    },
+
+    async putCatalogRecord(dbName, record) {
+      await createCatalogIndexedDbStore({ dbName }).put(record);
+      return true;
+    },
+
+    // Creates the PRE-MIGRATION (version 1) database exactly as the old
+    // indexedDbAdapter did: only kioskPersistence, with a customer-context record.
+    async createLegacyV1(dbName, record) {
+      const db = await openRaw(dbName, 1, (d) => d.createObjectStore("kioskPersistence"));
+      await new Promise((resolve, reject) => {
+        const tx = db.transaction("kioskPersistence", "readwrite");
+        tx.objectStore("kioskPersistence").put(record, STORAGE_KEY);
+        tx.oncomplete = resolve;
+        tx.onerror = () => reject(tx.error);
+      });
+      db.close();
+      return true;
+    },
+
+    async describeDb(dbName) {
+      const db = await openRaw(dbName);
+      const info = { version: db.version, stores: Array.from(db.objectStoreNames).sort() };
+      db.close();
+      return info;
+    },
+
+    async rawPersistenceRecord(dbName) {
+      return toPlain(await createIndexedDbStore({ dbName }).get(STORAGE_KEY));
+    },
+
+    // Customer-context resets exactly as the Kiosk runtime performs them.
+    async purgeCustomerContext(dbName) {
+      return toPlain(await createPersistenceAdapter(createIndexedDbStore({ dbName })).purgeCustomerContext());
+    },
+
+    async deleteDatabase(dbName) {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.deleteDatabase(dbName);
+        request.onsuccess = () => resolve({ ok: true, blocked: false });
+        request.onerror = () => reject(request.error);
+        request.onblocked = () => resolve({ ok: true, blocked: true });
+      });
+    },
+  };
+  window.__catalogTestLoaded = true;
+</script>
+</body>
+</html>

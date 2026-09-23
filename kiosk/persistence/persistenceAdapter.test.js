@@ -496,10 +496,12 @@ test("I33-36. adapter imports no Firebase/AWR/payment provider and never calls O
     "qris",
   ];
   const requireCallPattern = /require\(\s*["']([^"']+)["']\s*\)/g;
-  const files = ["persistenceTypes.js", "persistenceAdapter.js", "indexedDbAdapter.js"].map((f) =>
+  const files = ["persistenceTypes.js", "persistenceAdapter.js", "indexedDbAdapter.js", "kioskDbSchema.js"].map((f) =>
     path.join(__dirname, f)
   );
-  const allowedTargets = new Set(["./persistenceTypes", "./persistenceAdapter"]);
+  // kioskDbSchema: the shared, dependency-free IndexedDB schema (DB name,
+  // version 2, additive store upgrade) - scanned by this same guard above.
+  const allowedTargets = new Set(["./persistenceTypes", "./persistenceAdapter", "./kioskDbSchema"]);
 
   for (const file of files) {
     const source = fs.readFileSync(file, "utf8");

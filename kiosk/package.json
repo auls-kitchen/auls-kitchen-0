@@ -8,6 +8,7 @@
     "build:persistence-test": "esbuild persistence/indexedDbAdapter.js persistence/persistenceAdapter.js --bundle --platform=browser --format=esm --target=es2020 --sourcemap --outdir=dist",
     "build:auth-test": "esbuild auth/firebaseAuthAdapter.js --bundle --platform=browser --format=esm --target=es2020 --sourcemap --outfile=dist/firebaseAuthAdapter.js",
     "build:orderintent-test": "esbuild orderIntent/orderIntentAdapter.js --bundle --platform=browser --format=esm --target=es2020 --sourcemap --outfile=dist/orderIntentAdapter.js",
+    "build:catalog-test": "esbuild catalog/createBrowserCatalog.js catalog/catalogIndexedDbStore.js persistence/indexedDbAdapter.js persistence/persistenceAdapter.js --bundle --platform=browser --format=esm --target=es2020 --sourcemap --outdir=dist/catalog-test",
     "test:browser": "playwright test"
   },
   "devDependencies": {

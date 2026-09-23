@@ -23,9 +23,14 @@
  * requires it specifically.
  */
 
-const DEFAULT_DB_NAME = "aulKitchenKiosk";
-const DEFAULT_STORE_NAME = "kioskPersistence";
-const DEFAULT_DB_VERSION = 1;
+const kioskDbSchema = require("./kioskDbSchema");
+
+const DEFAULT_DB_NAME = kioskDbSchema.KIOSK_DB_NAME;
+const DEFAULT_STORE_NAME = kioskDbSchema.PERSISTENCE_STORE_NAME;
+// Version 2 adds the separate kioskCatalog store (see kioskDbSchema.js).
+// The upgrade is additive: this store and its customer-context record
+// are never touched by it.
+const DEFAULT_DB_VERSION = kioskDbSchema.KIOSK_DB_VERSION;
 
 /**
  * Creates a {get, set, delete} store backed by a single IndexedDB
@@ -50,10 +55,7 @@ function createIndexedDbStore(config) {
     dbPromise = new Promise((resolve, reject) => {
       const request = indexedDB.open(dbName, dbVersion);
       request.onupgradeneeded = () => {
-        const db = request.result;
-        if (!db.objectStoreNames.contains(storeName)) {
-          db.createObjectStore(storeName);
-        }
+        kioskDbSchema.ensureKioskObjectStores(request.result, [storeName]);
       };
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error);
