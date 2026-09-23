@@ -1,0 +1,22 @@
+rules_version = '2';
+
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Published Product Catalog Snapshot - customer-safe presentation
+    // data only (STEP 2D). Read-only, public, unauthenticated. Writing
+    // happens exclusively via the Admin SDK from a Cloud Function (which
+    // bypasses these Rules entirely, already runtime-verified) - never
+    // via a client credential. This must never grant client write.
+    match /catalog/{allPaths=**} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    // Everything else stays exactly as it was before this change:
+    // fully denied to every client, in every direction.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
