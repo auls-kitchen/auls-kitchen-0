@@ -604,6 +604,9 @@ import {
 import {
   getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+import {
+  getFunctions, httpsCallable
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
 
 const firebaseConfig = {
   apiKey: "AIzaSyB2498KtjyVe7pZ-RfPYvQybdJmlzUpqwg",
@@ -616,6 +619,12 @@ const firebaseConfig = {
 const firebaseApp = initializeApp(firebaseConfig);
 const db = getFirestore(firebaseApp);
 const auth = getAuth(firebaseApp);
+const functionsInstance = getFunctions(firebaseApp, "us-central1");
+// Step 2G Phase C — the callable owns the ENTIRE publish operation
+// (enumeration, validation, projection, canonicalization, hashing,
+// Storage writes). This page only ever invokes it; it never
+// enumerates products, computes a revision, or writes Storage itself.
+const publishCatalogCallable = httpsCallable(functionsInstance, "catalogPublish");
 
 // =========================================================
 // AUTH GATE — AUL-ADM login (Email/Password, single owner-admin)
@@ -1569,6 +1578,34 @@ document.getElementById("categoryFormSaveBtn").addEventListener("click", async (
 });
 
 // =========================================================
+// CATALOG PUBLISH (Step 2G Phase C)
+//
+// This handler ONLY invokes the `catalogPublish` callable and shows
+// its result. It does not enumerate products, does not compute a
+// revision, and does not write Storage — the callable owns all of
+// that server-side (Step 2F Gate 8, LOCKED).
+// =========================================================
+async function handlePublishCatalog() {
+  const btn = document.getElementById("publishCatalogBtn");
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Publishing...";
+  try {
+    const result = await publishCatalogCallable();
+    const { revision, productCount, publishedPath } = result.data;
+    alert(`Katalog berhasil di-publish.\nRevisi: ${revision}\nJumlah produk: ${productCount}\nPath: ${publishedPath}`);
+  } catch (err) {
+    const detail = err.details && err.details.reason === "VALIDATION_FAILED"
+      ? `\nProduk bermasalah: ${(err.details.affectedProductIds || []).join(", ")}`
+      : "";
+    alert("Gagal publish katalog: " + (err.message || "Unknown error") + detail);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = originalText;
+  }
+}
+
+// =========================================================
 // PRODUK (Master Produk CRUD + Foto + Resep + Modifier)
 // =========================================================
 let productSearchTerm = "";
@@ -1603,6 +1640,7 @@ function renderProducts() {
     <div class="product-toolbar-row">
       <button class="add-expense-btn" id="addProductBtn">+ Tambah Produk</button>
       <button class="add-expense-btn category-mgmt-btn" id="openCategoryMgmtBtn">Kategori</button>
+      <button class="add-expense-btn category-mgmt-btn" id="publishCatalogBtn">Publish Katalog</button>
     </div>
     <input type="text" class="product-search" id="productSearchInput" placeholder="Cari produk..." value="${productSearchTerm}">
     ${filtered.length === 0 ? '<div class="empty-msg">Produk tidak ditemukan.</div>' : rows}
@@ -1610,6 +1648,7 @@ function renderProducts() {
 
   document.getElementById("addProductBtn").addEventListener("click", () => openProductModal(null));
   document.getElementById("openCategoryMgmtBtn").addEventListener("click", () => openCategoryListModal());
+  document.getElementById("publishCatalogBtn").addEventListener("click", handlePublishCatalog);
   document.getElementById("productSearchInput").addEventListener("input", (e) => {
     productSearchTerm = e.target.value;
     const scrollPos = window.scrollY;
