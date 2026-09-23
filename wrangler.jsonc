@@ -1,0 +1,15 @@
+{
+  // Production asset boundary: only files under ./public are served.
+  // Everything else in the repository (functions/, tools/, docs, .git, ...)
+  // is intentionally outside the public static surface.
+  "name": "auls-kitchen-0",
+  "compatibility_date": "2026-09-03",
+  "observability": {
+    "enabled": true
+  },
+  "assets": {
+    "directory": "./public",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "none"
+  }
+}
