@@ -37,4 +37,22 @@ async function getProductById(productId) {
   return { id: snap.id, ...snap.data() };
 }
 
-module.exports = { getProductById };
+/**
+ * Fetch every product document in the `products` collection.
+ *
+ * Added for Step 2F (Catalog Publish) — this is the only place that
+ * needs the COMPLETE product set at once; every other existing caller
+ * (orderIntent, posSale) only ever needs one product by ID via
+ * `getProductById`, which this does not change.
+ *
+ * This repository performs ONLY reads. It must never write to `products`.
+ *
+ * @returns {Promise<Array<object>>} one `{ id, ...data }` entry per document.
+ */
+async function listProducts() {
+  const db = getFirestore();
+  const snap = await db.collection("products").get();
+  return snap.docs.map((doc) => ({ id: doc.id, ...doc.data() }));
+}
+
+module.exports = { getProductById, listProducts };
