@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>STEP 87 Firebase Auth Emulator Harness</title>
+</head>
+<body>
+  <h1>STEP 87 Firebase Auth Emulator Harness</h1>
+  <p id="status">INITIALIZING</p>
+
+  <script type="module">
+    import { initializeApp } from
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+
+    import {
+      getAuth,
+      connectAuthEmulator,
+      onAuthStateChanged,
+      signInAnonymously,
+      signOut
+    } from
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+    import authModule from "../dist/firebaseAuthAdapter.js";
+
+    const status = document.getElementById("status");
+
+    const TEST_PROJECT_ID = "demo-no-project";
+    const AUTH_EMULATOR_URL = "http://127.0.0.1:9099";
+
+    /*
+     * STEP 87 production guard:
+     * This harness intentionally contains its own synthetic emulator-only
+     * Firebase configuration. It does not read .firebaserc or production
+     * application configuration.
+     */
+    const firebaseConfig = {
+      apiKey: "demo-api-key",
+      authDomain: "demo-no-project.firebaseapp.com",
+      projectId: TEST_PROJECT_ID,
+      appId: "demo-app-id"
+    };
+
+    const testState = {
+      emulatorConnected: false,
+      emulatorUrl: AUTH_EMULATOR_URL,
+      projectId: TEST_PROJECT_ID,
+      signInCalls: 0,
+      signOutCalls: 0
+    };
+
+    function failClosed(message) {
+      testState.failed = true;
+      testState.failure = message;
+      status.textContent = "FAILED: " + message;
+      throw new Error(message);
+    }
+
+    if (!authModule || typeof authModule.createFirebaseAuthAdapter !== "function") {
+      failClosed("Auth adapter artifact export is unavailable");
+    }
+
+    const { createFirebaseAuthAdapter } = authModule;
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+
+    /*
+     * REQUIRED STEP 87 boundary:
+     * connectAuthEmulator() happens before any Auth operation.
+     */
+    try {
+      connectAuthEmulator(auth, AUTH_EMULATOR_URL, {
+        disableWarnings: true
+      });
+      testState.emulatorConnected = true;
+    } catch (error) {
+      failClosed("Firebase Auth Emulator connection failed");
+    }
+
+    if (!testState.emulatorConnected) {
+      failClosed("Production fallback is forbidden");
+    }
+
+    async function trackedSignIn(authInstance) {
+      testState.signInCalls += 1;
+      return signInAnonymously(authInstance);
+    }
+
+    async function trackedSignOut(authInstance) {
+      testState.signOutCalls += 1;
+      return signOut(authInstance);
+    }
+
+    const adapter = createFirebaseAuthAdapter({
+      auth,
+      onAuthStateChanged,
+      signInAnonymously: trackedSignIn,
+      signOut: trackedSignOut
+    });
+
+    if (
+      !adapter ||
+      typeof adapter.resolveOwnerUid !== "function" ||
+      typeof adapter.requestAuthReset !== "function"
+    ) {
+      failClosed("Auth adapter public contract is invalid");
+    }
+
+    window.__step87Auth = Object.freeze({
+      testState,
+      adapter,
+      firebaseConfig: Object.freeze({ ...firebaseConfig }),
+
+      async resolveOwnerUid() {
+        return adapter.resolveOwnerUid();
+      },
+
+      async requestAuthReset() {
+        return adapter.requestAuthReset();
+      }
+    });
+
+    status.textContent = "READY";
+  </script>
+</body>
+</html>

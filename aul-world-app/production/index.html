@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>AUL's Kitchen — Kiosk</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #14181f; color: #e6e6e6; font-family: system-ui, sans-serif; }
+</style>
+</head>
+<body>
+<!--
+  Production Kiosk Experience shell (D3 Step 1 - Production Experience Shell
+  Boundary). This is the smallest real entry point for the Composition: it
+  mounts the real AWR World and the real Kiosk Domain (real Firebase Auth,
+  real IndexedDB, real OrderIntent callable) - never a fake/test double.
+
+  Deliberately does NOT yet contain: Menu/Product UI, Cart UI, Confirmation
+  UI, a Product Catalog read seam, or any Aul contextual-response wiring -
+  those belong to later, separately-approved steps.
+-->
+<div id="app"></div>
+<script type="module" src="./main.js"></script>
+</body>
+</html>

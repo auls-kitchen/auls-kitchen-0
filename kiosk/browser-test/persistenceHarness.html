@@ -1,0 +1,118 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Kiosk Persistence Browser Verification Harness (STEP 85) - TEST ONLY</title>
+</head>
+<body>
+<!--
+  Kiosk IndexedDB persistence browser verification harness (STEP 85).
+
+  TEST INFRASTRUCTURE ONLY - never part of production, never bundled
+  into kiosk/dist/createBrowserKiosk.js, never deployed. This harness
+  is deliberately lower-level than kioskHarness.html (STEP 83): it
+  proves ONLY the persistence boundary -
+
+    persistenceAdapter -> createIndexedDbStore -> native browser IndexedDB
+
+  - with no Firebase, no Auth, no Runtime, no Host, and no
+  createBrowserKiosk() involved at all. It imports the real, unmodified
+  generated artifacts kiosk/dist/persistenceAdapter.js and
+  kiosk/dist/indexedDbAdapter.js (built by `npm run
+  build:persistence-test`, a second, independent esbuild entry point
+  alongside the existing `build` script - still exactly one Kiosk
+  bundler, esbuild).
+
+  Uses REAL window.indexedDB - no fake-indexeddb, no mock, no
+  monkey-patching. Database name/store name/version are always supplied
+  explicitly by the Playwright spec via the existing, already-supported
+  createIndexedDbStore({dbName, storeName, dbVersion}) config seam -
+  never the production defaults ("aulKitchenKiosk" /
+  "kioskPersistence").
+
+  The one test-only global this file defines, window.__persistenceTest,
+  exists ONLY here - it must never appear in any kiosk/**/*.js
+  production/domain file.
+-->
+<script type="module">
+  import indexedDbModule from "../dist/indexedDbAdapter.js";
+  import persistenceModule from "../dist/persistenceAdapter.js";
+
+  const { createIndexedDbStore } = indexedDbModule;
+  const { createPersistenceAdapter, STORAGE_KEY } = persistenceModule;
+
+  function buildAdapter(dbConfig) {
+    const store = createIndexedDbStore(dbConfig);
+    const adapter = createPersistenceAdapter(store);
+    return { store, adapter };
+  }
+
+  // Guarantees whatever comes back can cross page.evaluate()'s
+  // serialization boundary intact (plain data only - the adapter never
+  // returns functions/DOM nodes, but this keeps the boundary explicit).
+  function toPlain(value) {
+    return JSON.parse(JSON.stringify(value === undefined ? null : value));
+  }
+
+  function deleteDatabase(dbName) {
+    return new Promise((resolve, reject) => {
+      const request = indexedDB.deleteDatabase(dbName);
+      request.onsuccess = () => resolve({ ok: true, blocked: false });
+      request.onerror = () => reject(request.error);
+      // A connection left open by a prior operation in THIS page would
+      // block deletion - the Playwright spec avoids this by reloading
+      // the page before deleting between test groups (createIndexedDbStore
+      // exposes no close(), and STEP 85 does not add one).
+      request.onblocked = () => resolve({ ok: true, blocked: true });
+    });
+  }
+
+  window.__persistenceTest = {
+    hasNativeIndexedDB: () => typeof window.indexedDB !== "undefined",
+    storageKey: STORAGE_KEY,
+
+    async load(dbConfig, ownerUid, expiryOptions) {
+      const { adapter } = buildAdapter(dbConfig);
+      return toPlain(await adapter.load(ownerUid, expiryOptions));
+    },
+    async saveCartDraft(dbConfig, ownerUid, cartDraft) {
+      const { adapter } = buildAdapter(dbConfig);
+      return toPlain(await adapter.saveCartDraft(ownerUid, cartDraft));
+    },
+    async saveSubmissionAttempt(dbConfig, ownerUid, submissionAttempt) {
+      const { adapter } = buildAdapter(dbConfig);
+      return toPlain(await adapter.saveSubmissionAttempt(ownerUid, submissionAttempt));
+    },
+    async saveAuthoritativeResult(dbConfig, ownerUid, idempotencyKey, authoritativeResult) {
+      const { adapter } = buildAdapter(dbConfig);
+      return toPlain(await adapter.saveAuthoritativeResult(ownerUid, idempotencyKey, authoritativeResult));
+    },
+    async purgeCustomerContext(dbConfig) {
+      const { adapter } = buildAdapter(dbConfig);
+      return toPlain(await adapter.purgeCustomerContext());
+    },
+
+    // DIRECT INJECTION (test-only bypass of persistenceAdapter, mirroring
+    // the already-proven Node-level `store._map.set(STORAGE_KEY, raw)`
+    // technique from persistenceAdapter.test.js) - writes straight to the
+    // real IndexedDB-backed store, skipping all adapter-level validation,
+    // used ONLY for expiry-backdating and corruption injection (never for
+    // normal-path writes, which always go through the adapter above).
+    async rawInject(dbConfig, rawRecord) {
+      const { store } = buildAdapter(dbConfig);
+      await store.set(STORAGE_KEY, rawRecord);
+      return { ok: true };
+    },
+    async rawRead(dbConfig) {
+      const { store } = buildAdapter(dbConfig);
+      return toPlain(await store.get(STORAGE_KEY));
+    },
+
+    async deleteDatabase(dbName) {
+      return deleteDatabase(dbName);
+    },
+  };
+  window.__persistenceTestLoaded = true;
+</script>
+</body>
+</html>

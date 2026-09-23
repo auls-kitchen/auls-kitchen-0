@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>STEP 89 Firebase Functions Emulator Harness</title>
+</head>
+<body>
+  <h1>STEP 89 Firebase Functions Emulator Harness</h1>
+  <p id="status">INITIALIZING</p>
+
+  <script type="module">
+    import { initializeApp } from
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+
+    import {
+      getAuth,
+      connectAuthEmulator,
+      onAuthStateChanged,
+      signInAnonymously,
+      signOut
+    } from
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+
+    import {
+      getFunctions,
+      connectFunctionsEmulator,
+      httpsCallable
+    } from
+      "https://www.gstatic.com/firebasejs/10.12.2/firebase-functions.js";
+
+    import orderIntentModule from "../dist/orderIntentAdapter.js";
+
+    const status = document.getElementById("status");
+
+    const TEST_PROJECT_ID = "demo-orderintent-test";
+    const AUTH_EMULATOR_URL = "http://127.0.0.1:9099";
+    const FUNCTIONS_EMULATOR_HOST = "127.0.0.1";
+    const FUNCTIONS_EMULATOR_PORT = 5001;
+
+    /*
+     * STEP 89 production guard:
+     * This harness intentionally contains its own synthetic emulator-only
+     * Firebase configuration, matching the demo project id the emulator
+     * suite is started with. It does not read .firebaserc or production
+     * application configuration.
+     */
+    const firebaseConfig = {
+      apiKey: "demo-api-key",
+      authDomain: TEST_PROJECT_ID + ".firebaseapp.com",
+      projectId: TEST_PROJECT_ID,
+      appId: "demo-app-id"
+    };
+
+    const testState = {
+      emulatorConnected: false,
+      functionsEmulatorConnected: false,
+      authEmulatorUrl: AUTH_EMULATOR_URL,
+      functionsEmulatorHost: FUNCTIONS_EMULATOR_HOST + ":" + FUNCTIONS_EMULATOR_PORT,
+      projectId: TEST_PROJECT_ID,
+      signInCalls: 0,
+      signOutCalls: 0,
+      persistenceCalls: {
+        saveSubmissionAttempt: 0,
+        saveAuthoritativeResult: 0,
+        removeSubmissionAttempt: 0
+      },
+      httpsCallableInvocations: 0
+    };
+
+    function failClosed(message) {
+      testState.failed = true;
+      testState.failure = message;
+      status.textContent = "FAILED: " + message;
+      throw new Error(message);
+    }
+
+    if (!orderIntentModule || typeof orderIntentModule.submitNewAttempt !== "function") {
+      failClosed("OrderIntent adapter artifact export is unavailable");
+    }
+
+    const { submitNewAttempt, retryUnknownAttempt } = orderIntentModule;
+
+    const app = initializeApp(firebaseConfig);
+    const auth = getAuth(app);
+    const functionsInstance = getFunctions(app, "us-central1");
+
+    /*
+     * REQUIRED STEP 89 boundary: both emulator connections happen before
+     * any Auth or Functions operation. This is the seam STEP88 kept
+     * CONTROLLED (a stub, never invoked) - here it is REAL.
+     */
+    try {
+      connectAuthEmulator(auth, AUTH_EMULATOR_URL, { disableWarnings: true });
+      testState.emulatorConnected = true;
+    } catch (error) {
+      failClosed("Firebase Auth Emulator connection failed");
+    }
+
+    try {
+      connectFunctionsEmulator(functionsInstance, FUNCTIONS_EMULATOR_HOST, FUNCTIONS_EMULATOR_PORT);
+      testState.functionsEmulatorConnected = true;
+    } catch (error) {
+      failClosed("Firebase Functions Emulator connection failed");
+    }
+
+    if (!testState.emulatorConnected || !testState.functionsEmulatorConnected) {
+      failClosed("Production fallback is forbidden");
+    }
+
+    async function trackedSignIn(authInstance) {
+      testState.signInCalls += 1;
+      return signInAnonymously(authInstance);
+    }
+
+    async function trackedSignOut(authInstance) {
+      testState.signOutCalls += 1;
+      return signOut(authInstance);
+    }
+
+    // Real network call to the real orderIntent callable, via the real
+    // Functions Emulator - the exact seam this step flips from CONTROLLED
+    // to REAL. No stub, no fabricated response.
+    const realCallable = httpsCallable(functionsInstance, "orderIntent");
+    async function callOrderIntent(payload) {
+      testState.httpsCallableInvocations += 1;
+      try {
+        return await realCallable(payload);
+      } catch (err) {
+        testState.lastRawError = {
+          code: err && err.code,
+          message: err && err.message,
+          details: err && err.details,
+        };
+        throw err;
+      }
+    }
+
+    // Intentionally the one remaining CONTROLLED piece: an in-memory fake
+    // persistence, since persistence realness was already proven for real
+    // in STEP85 and is not this step's job. Never touches IndexedDB.
+    let inFlightRecord = null;
+    const persistence = {
+      async saveSubmissionAttempt(ownerUid, attempt) {
+        testState.persistenceCalls.saveSubmissionAttempt += 1;
+        inFlightRecord = { ownerUid, attempt };
+        return { ok: true };
+      },
+      async saveAuthoritativeResult(ownerUid, idempotencyKey, data) {
+        testState.persistenceCalls.saveAuthoritativeResult += 1;
+        return { ok: true };
+      },
+      async removeSubmissionAttempt(ownerUid) {
+        testState.persistenceCalls.removeSubmissionAttempt += 1;
+        inFlightRecord = null;
+        return { ok: true };
+      }
+    };
+
+    window.__step89 = Object.freeze({
+      testState,
+      firebaseConfig: Object.freeze({ ...firebaseConfig }),
+
+      async signIn() {
+        const result = await trackedSignIn(auth);
+        return result.user.uid;
+      },
+
+      async signOutUser() {
+        await trackedSignOut(auth);
+      },
+
+      currentUid() {
+        return auth.currentUser ? auth.currentUser.uid : null;
+      },
+
+      /**
+       * Submits a brand-new attempt through the REAL, unmodified
+       * orderIntentAdapter.submitNewAttempt, wired to the REAL Functions
+       * Emulator callable above. `fixedKey`, when provided, forces a
+       * deterministic idempotencyKey (for replay tests) - the adapter's
+       * own DI seam (`deps.generateKey`) is used exactly as designed,
+       * nothing is monkey-patched.
+       */
+      async submitNew({ productId, quantity, customerName, notes }, fixedKey) {
+        const ownerUid = auth.currentUser ? auth.currentUser.uid : null;
+        const deps = fixedKey ? { generateKey: () => fixedKey } : undefined;
+
+        const result = await submitNewAttempt(
+          {
+            items: [{ productId, quantity, selectedModifiers: [] }],
+            customerName: customerName === undefined ? null : customerName,
+            notes: notes === undefined ? null : notes,
+            ownerUid,
+            persistence,
+            callOrderIntent
+          },
+          deps
+        );
+
+        return {
+          outcome: result.outcome,
+          category: result.category || null,
+          reason: result.reason || null,
+          idempotencyKey: result.attempt ? result.attempt.idempotencyKey : null,
+          authoritativeResult:
+            result.attempt && result.attempt.authoritativeResult
+              ? result.attempt.authoritativeResult
+              : null
+        };
+      }
+    });
+
+    status.textContent = "READY";
+  </script>
+</body>
+</html>

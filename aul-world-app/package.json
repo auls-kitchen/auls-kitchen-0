@@ -1,0 +1,23 @@
+{
+  "name": "aul-world-app",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "AUL World Composition / Experience bridge (Continuous Experience / Habitat v1). Owns the Experience-only interaction lifecycle and the Composition root over frozen AWR and the Kiosk Domain. Not wired into production. Not deployed. Never modifies aul-world-runtime/, kiosk/, or functions/.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test \"test/unit/**/*.test.ts\"",
+    "build:e2e": "node scripts/buildE2e.mjs",
+    "build:prod": "node scripts/buildProd.mjs",
+    "test:e2e": "playwright test",
+    "verify:frozen": "node --test test/gates/frozenBoundary.test.ts"
+  },
+  "dependencies": {
+    "pixi.js": "8.20.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.56.1",
+    "esbuild": "0.28.2",
+    "typescript": "5.9.3"
+  }
+}

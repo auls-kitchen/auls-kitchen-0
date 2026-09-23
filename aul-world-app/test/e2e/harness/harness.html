@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>AUL World Composition e2e harness (U3) - TEST ONLY</title>
+</head>
+<body style="margin:0;background:#14181f;color:#e6e6e6;font-family:system-ui,sans-serif">
+<!--
+  TEST INFRASTRUCTURE ONLY - never part of production, never deployed.
+  It mounts the real Composition root over the real AWR modules and the real
+  Kiosk Host (built from kiosk/ SOURCE with a fake Firebase; no network, no
+  emulator). window.__u3 is the one test-only global and exists only here.
+-->
+<div id="app"></div>
+<script type="module" src="./harness.js"></script>
+</body>
+</html>
