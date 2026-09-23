@@ -20,9 +20,11 @@ initializeApp();
 const { healthCheck } = require("./src/functions/healthCheck");
 const { orderIntent } = require("./src/functions/orderIntent");
 const { posSale } = require("./src/functions/posSale");
+const { catalogPublish } = require("./src/functions/catalogPublish");
 
 module.exports = {
   healthCheck,
   orderIntent,
   posSale,
+  catalogPublish,
 };
